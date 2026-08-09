@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FranchiseFinder — Settings</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; background: #111; color: #eee; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.05rem; margin-top: 36px; border-bottom: 1px solid #333; padding-bottom: 6px; }
+    p.intro { color: #999; font-size: 0.9rem; }
+    p.intro a { color: #7aa2f7; }
+    nav { margin-bottom: 20px; }
+    nav a { color: #7aa2f7; text-decoration: none; margin-right: 16px; font-size: 0.9rem; }
+    nav a.active { color: #eee; font-weight: 600; }
+
+    .banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9rem; }
+    .banner-success { background: #1f4a26; border: 1px solid #2e7d32; color: #b7e6bd; }
+    .banner-warning { background: #4a3f1f; border: 1px solid #7d6a2e; color: #e6d5b7; }
+    .banner-error { background: #4a1f1f; border: 1px solid #6d1f1f; color: #f5b5b5; }
+    .banner-saved { background: #1f2f4a; border: 1px solid #2e4f7d; color: #b7cde6; }
+
+    form.editor { border: 1px solid #333; border-radius: 8px; padding: 16px; }
+    form.editor label { display: block; margin-top: 14px; font-size: 0.85rem; color: #bbb; }
+    form.editor input, form.editor select {
+      width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px;
+      background: #1a1a1a; border: 1px solid #333; border-radius: 6px; color: #eee; font-family: inherit;
+    }
+    .hint-text { color: #777; font-size: 0.75rem; margin-top: 3px; }
+    .field { display: none; }
+    .field.visible { display: block; }
+    .submit-row { margin-top: 20px; display: flex; gap: 8px; }
+    button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+    .save { background: #2e7d32; color: white; }
+    .test { background: #333; color: #ccc; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('index') }}">Approvals</a>
+    <a href="{{ url_for('franchises_page') }}">Manage Franchises</a>
+    <a class="active" href="{{ url_for('settings_page') }}">Settings</a>
+  </nav>
+
+  <h1>Settings</h1>
+
+  <h2>TMDB &amp; MDBList (required)</h2>
+  <p class="intro">
+    Powers title discovery (TMDB) and list syncing (MDBList). The app can't
+    scan any franchise until both are set.
+  </p>
+  <p class="intro">
+    Need keys? <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Get a free TMDB API key</a>
+    and <a href="https://mdblist.com/preferences/#api_key_uid" target="_blank" rel="noopener">a free MDBList API key</a>
+    — both take a couple of minutes, no payment involved.
+  </p>
+
+  {% if core_test_result == 'success' %}
+    <div class="banner banner-success">✓ {{ core_test_message }}</div>
+  {% elif core_test_result == 'error' %}
+    <div class="banner banner-error">✗ {{ core_test_message }}</div>
+  {% elif core_test_result == 'saved' %}
+    <div class="banner banner-saved">Settings saved.</div>
+  {% endif %}
+
+  <form class="editor" method="post" action="{{ url_for('settings_core_save') }}">
+    <label>
+      TMDB API key
+      <input type="text" name="tmdb_api_key" autocomplete="off"
+             value="{{ core.tmdb_api_key_masked if core.tmdb_api_key else '' }}"
+             placeholder="Paste your TMDB API key">
+    </label>
+
+    <label>
+      MDBList API key
+      <input type="text" name="mdblist_api_key" autocomplete="off"
+             value="{{ core.mdblist_api_key_masked if core.mdblist_api_key else '' }}"
+             placeholder="Paste your MDBList API key">
+    </label>
+
+    <label>
+      Scan interval (hours)
+      <input type="text" name="check_interval_hours" value="{{ core.check_interval_hours }}">
+    </label>
+
+    <label>
+      Notification webhook URL <span class="hint-text">(optional — Discord webhook, ntfy topic, etc)</span>
+      <input type="text" name="notify_url" value="{{ core.notify_url }}" placeholder="https://discord.com/api/webhooks/...">
+    </label>
+
+    <div class="hint-text" style="margin-top: 10px;">
+      Keys are stored in config/settings.json on your server, never in git.
+      Leaving a masked value in place on save keeps your existing key.
+    </div>
+
+    <div class="submit-row">
+      <button class="save" type="submit" name="action" value="save">Save</button>
+      <button class="test" type="submit" name="action" value="test">Save &amp; test connection</button>
+    </div>
+  </form>
+
+  <h2>LLM Provider (optional)</h2>
+  <p class="intro">
+    Powers the optional gap-finding pass that runs alongside the TMDB filter
+    each scan. Leave the provider set to Disabled to skip this step entirely
+    — the app works fine without it.
+  </p>
+
+  <p class="intro">
+    Need a key? <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google Gemini</a>
+    and <a href="https://console.groq.com/keys" target="_blank" rel="noopener">Groq</a>
+    both issue free API keys instantly with no credit card — just an email or Google/GitHub account.
+  </p>
+
+  {% if test_result == 'success' %}
+    <div class="banner banner-success">✓ Connection works. {{ test_message }}</div>
+  {% elif test_result == 'warning' %}
+    <div class="banner banner-warning">Connected, but response looked unexpected. {{ test_message }}</div>
+  {% elif test_result == 'error' %}
+    <div class="banner banner-error">✗ {{ test_message }}</div>
+  {% elif test_result == 'saved' %}
+    <div class="banner banner-saved">Settings saved.</div>
+  {% endif %}
+
+  <form class="editor" method="post" action="{{ url_for('settings_save') }}" id="settings-form">
+    <label>
+      Provider
+      <select name="provider" id="provider-select">
+        {% for key, info in providers.items() %}
+          <option value="{{ key }}" {{ 'selected' if settings.provider == key }}>{{ info.label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <div class="field" data-for="key">
+      <label>
+        API key
+        <input type="text" name="api_key" autocomplete="off"
+               value="{{ settings.api_key_masked if settings.api_key else '' }}"
+               placeholder="Paste your API key">
+        <div class="hint-text">Stored in config/settings.json on your server, never in git. Re-entering isn't needed unless you're changing it — leaving the masked value in place keeps your existing key.</div>
+        <div class="hint-text" id="key-link"></div>
+      </label>
+    </div>
+
+    <label>
+      Model <span class="hint-text">(optional — a sensible default is used if left blank)</span>
+      <input type="text" name="model" value="{{ settings.model }}" placeholder="e.g. gemini-2.5-flash">
+    </label>
+
+    <div class="field" data-for="base_url">
+      <label>
+        Base URL
+        <input type="text" name="base_url" value="{{ settings.base_url }}" placeholder="http://ollama:11434">
+        <div class="hint-text">Address of your Ollama server, reachable from this container (e.g. a service name in the same docker-compose network).</div>
+      </label>
+    </div>
+
+    <div class="submit-row">
+      <button class="save" type="submit" name="action" value="save">Save</button>
+      <button class="test" type="submit" name="action" value="test">Save &amp; test connection</button>
+    </div>
+  </form>
+
+  <script>
+    const providerInfo = {{ providers | tojson }};
+    const select = document.getElementById('provider-select');
+    const keyLink = document.getElementById('key-link');
+
+    const KEY_LINKS = {
+      anthropic: '<a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener">Get an Anthropic API key</a> (paid — no free tier).',
+      gemini: '<a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get a free Gemini API key</a> — no credit card required.',
+      groq: '<a href="https://console.groq.com/keys" target="_blank" rel="noopener">Get a free Groq API key</a> — no credit card required.',
+    };
+
+    function updateFields() {
+      const info = providerInfo[select.value] || {};
+      document.querySelectorAll('.field[data-for="key"]').forEach(el => {
+        el.classList.toggle('visible', !!info.needs_key);
+      });
+      document.querySelectorAll('.field[data-for="base_url"]').forEach(el => {
+        el.classList.toggle('visible', !!info.needs_base_url);
+      });
+      keyLink.innerHTML = KEY_LINKS[select.value] || '';
+    }
+
+    select.addEventListener('change', updateFields);
+    updateFields();
+  </script>
+</body>
+</html>

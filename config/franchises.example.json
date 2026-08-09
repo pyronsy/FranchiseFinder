@@ -1,0 +1,28 @@
+[
+  {
+    "id": "mcu",
+    "name": "Marvel Cinematic Universe",
+    "mdblist_list_id": "your_mcu_list_id",
+    "tmdb_filter": { "type": "company", "id": 420 },
+    "exclude_title_keywords": ["assembled", "legends", "expanding the universe"],
+    "exclude_tmdb_ids": [],
+    "llm_hint": "Include Marvel Studios films and Disney+ series (Phases 1-6+). Exclude Fox X-Men/Fantastic Four films, Sony's non-MCU Spider-Man films (Venom, Morbius), and making-of/documentary specials."
+  },
+  {
+    "id": "star-wars",
+    "name": "Star Wars",
+    "mdblist_list_id": "your_star_wars_list_id",
+    "tmdb_filter": { "type": "keyword", "id": 4270 },
+    "exclude_title_keywords": ["disney gallery", "prop shop"],
+    "exclude_tmdb_ids": [],
+    "llm_hint": "Include the theatrical Skywalker Saga, spin-off films (Rogue One, Solo), and live-action/animated Disney+ series (Mandalorian, Andor, Ahsoka, Clone Wars, Rebels, etc). Exclude fan films and non-canon Legends-era content."
+  },
+  {
+    "id": "wizarding-world",
+    "name": "Wizarding World",
+    "mdblist_list_id": "your_wizarding_world_list_id",
+    "tmdb_filter": { "type": "keyword", "id": 9663 },
+    "exclude_title_keywords": [],
+    "exclude_tmdb_ids": []
+  }
+]

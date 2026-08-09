@@ -1,0 +1,39 @@
+services:
+  franchisefinder:
+    # Default: build from the source in this directory (what you get from
+    # `git clone`). To use the prebuilt image from GitHub Container Registry
+    # instead — no local build needed — comment out `build: .` and
+    # uncomment the `image:` line below, or use docker-compose.prebuilt.yml
+    # instead of this file (see the README's "Pull instead of build"
+    # section — no repo clone required at all with that option).
+    build: .
+    # image: ghcr.io/pyronsy/franchisefinder:latest
+    container_name: franchisefinder
+    restart: unless-stopped
+    ports:
+      - "8420:8420"
+    env_file:
+      - .env
+    volumes:
+      - ./config:/config
+      - ./data:/data
+
+  # Uncomment to run a local LLM instead of a cloud provider. Pick "Ollama"
+  # as the provider on the Settings page and set Base URL to
+  # http://ollama:11434 (the default). After starting, pull a model with:
+  #   docker exec -it ollama ollama pull llama3.1
+  #
+  # ollama:
+  #   image: ollama/ollama
+  #   container_name: ollama
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./ollama-data:/root/.ollama
+  #   # Uncomment for GPU acceleration (requires the NVIDIA container toolkit):
+  #   # deploy:
+  #   #   resources:
+  #   #     reservations:
+  #   #       devices:
+  #   #         - driver: nvidia
+  #   #           count: all
+  #   #           capabilities: [gpu]

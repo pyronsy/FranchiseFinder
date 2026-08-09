@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FranchiseFinder — Manage Franchises</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; background: #111; color: #eee; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.1rem; margin-top: 32px; border-bottom: 1px solid #333; padding-bottom: 6px; }
+    nav { margin-bottom: 20px; }
+    nav a { color: #7aa2f7; text-decoration: none; margin-right: 16px; font-size: 0.9rem; }
+    nav a.active { color: #eee; font-weight: 600; }
+    .franchise { display: flex; justify-content: space-between; align-items: flex-start; padding: 12px; border: 1px solid #333; border-radius: 8px; margin-bottom: 10px; }
+    .meta { display: flex; flex-direction: column; }
+    .name { font-weight: 600; }
+    .sub { color: #999; font-size: 0.85rem; }
+    .hint { color: #888; font-size: 0.8rem; margin-top: 4px; max-width: 480px; }
+    .actions form, .actions a { display: inline; }
+    button { padding: 6px 12px; border: none; border-radius: 6px; cursor: pointer; margin-left: 6px; font-size: 0.85rem; }
+    .edit { background: #333; color: #ccc; text-decoration: none; padding: 6px 12px; border-radius: 6px; }
+    .delete { background: #6d1f1f; color: white; }
+    .empty { color: #888; }
+    .error { background: #4a1f1f; border: 1px solid #6d1f1f; color: #f5b5b5; padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; }
+
+    form.editor { border: 1px solid #333; border-radius: 8px; padding: 16px; margin-top: 10px; }
+    form.editor label { display: block; margin-top: 12px; font-size: 0.85rem; color: #bbb; }
+    form.editor input, form.editor select, form.editor textarea {
+      width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px;
+      background: #1a1a1a; border: 1px solid #333; border-radius: 6px; color: #eee; font-family: inherit;
+    }
+    form.editor .row { display: flex; gap: 12px; }
+    form.editor .row > div { flex: 1; }
+    form.editor .hint-text { color: #777; font-size: 0.75rem; margin-top: 3px; }
+    .submit-row { margin-top: 16px; }
+    .submit { background: #2e7d32; color: white; padding: 8px 16px; }
+    .cancel { background: #333; color: #ccc; text-decoration: none; padding: 8px 16px; border-radius: 6px; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('index') }}">Approvals</a>
+    <a class="active" href="{{ url_for('franchises_page') }}">Manage Franchises</a>
+    <a href="{{ url_for('settings_page') }}">Settings</a>
+  </nav>
+
+  <h1>Manage Franchises</h1>
+
+  {% if error %}
+    <div class="error">{{ error }}</div>
+  {% endif %}
+
+  {% if franchises %}
+    {% for f in franchises %}
+      <div class="franchise">
+        <div class="meta">
+          <span class="name">{{ f.name }}</span>
+          <span class="sub">
+            id: {{ f.id }} · filter: {{ f.tmdb_filter.type }} {{ f.tmdb_filter.id }} · MDBList list {{ f.mdblist_list_id }}
+          </span>
+          {% if f.llm_hint %}
+            <span class="hint">LLM hint: {{ f.llm_hint }}</span>
+          {% endif %}
+        </div>
+        <div class="actions">
+          <a class="edit" href="{{ url_for('franchises_edit_form', franchise_id=f.id) }}">Edit</a>
+          <form method="post" action="{{ url_for('franchises_delete', franchise_id=f.id) }}" onsubmit="return confirm('Delete {{ f.name }}? Its pending/rejected history will remain on disk but it will stop being scanned.');">
+            <button class="delete" type="submit">Delete</button>
+          </form>
+        </div>
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="empty">No franchises yet — add one below.</p>
+  {% endif %}
+
+  <h2>{{ 'Edit franchise' if editing else 'Add a franchise' }}</h2>
+
+  <form
+    class="editor"
+    method="post"
+    action="{{ url_for('franchises_update', franchise_id=editing.id) if editing else url_for('franchises_add') }}"
+  >
+    <label>
+      Name
+      <input type="text" name="name" required placeholder="e.g. Marvel Cinematic Universe"
+             value="{{ editing.name if editing else '' }}">
+    </label>
+
+    <label>
+      MDBList list ID
+      <input type="text" name="mdblist_list_id" required placeholder="e.g. 123456"
+             value="{{ editing.mdblist_list_id if editing else '' }}">
+      <div class="hint-text">Approved items for this franchise are pushed to this MDBList list.</div>
+    </label>
+
+    <div class="row">
+      <div>
+        <label>
+          TMDB filter type
+          <select name="filter_type">
+            <option value="company" {{ 'selected' if editing and editing.tmdb_filter.type == 'company' }}>Company / studio</option>
+            <option value="keyword" {{ 'selected' if editing and editing.tmdb_filter.type == 'keyword' }}>Keyword</option>
+            <option value="network" {{ 'selected' if editing and editing.tmdb_filter.type == 'network' }}>TV network</option>
+          </select>
+        </label>
+      </div>
+      <div>
+        <label>
+          TMDB filter ID
+          <input type="text" name="filter_id" required placeholder="e.g. 420"
+                 value="{{ editing.tmdb_filter.id if editing else '' }}">
+        </label>
+      </div>
+    </div>
+    <div class="hint-text">
+      Find IDs on TMDB's website: a studio/company page, a title's Keywords tab, or a network page — the ID is in the URL.
+    </div>
+
+    <label>
+      Exclude title keywords <span class="hint-text">(comma-separated, optional)</span>
+      <input type="text" name="exclude_title_keywords" placeholder="assembled, legends"
+             value="{{ editing.exclude_title_keywords|join(', ') if editing else '' }}">
+    </label>
+
+    <label>
+      Exclude specific TMDB IDs <span class="hint-text">(comma-separated, optional — format movie:1234 or tv:5678)</span>
+      <input type="text" name="exclude_tmdb_ids" placeholder="movie:1234, tv:5678"
+             value="{{ editing.exclude_tmdb_ids|join(', ') if editing else '' }}">
+    </label>
+
+    <label>
+      LLM hint <span class="hint-text">(optional — only used if an LLM provider is configured on the Settings page)</span>
+      <textarea name="llm_hint" rows="3" placeholder="Include X and Y. Exclude Z.">{{ editing.llm_hint if editing else '' }}</textarea>
+    </label>
+
+    <div class="submit-row">
+      <button class="submit" type="submit">{{ 'Save changes' if editing else 'Add franchise' }}</button>
+      {% if editing %}
+        <a class="cancel" href="{{ url_for('franchises_page') }}">Cancel</a>
+      {% endif %}
+    </div>
+  </form>
+</body>
+</html>
