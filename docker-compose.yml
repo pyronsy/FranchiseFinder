@@ -1,22 +1,36 @@
+# The only supported way to run FranchiseFinder: pull the published image.
+# No git clone or local build needed — this one file is enough.
+#
+# Usage:
+#   mkdir franchisefinder && cd franchisefinder
+#   curl -O https://raw.githubusercontent.com/pyronsy/FranchiseFinder/main/docker-compose.yml
+#   docker compose pull
+#   docker compose up -d
+#
+# Docker creates ./config and ./data next to this file automatically on
+# first run. Once it's up, open http://<your-host>:8420 and enter your
+# TMDB/MDBList keys (and anything else) on the Settings page — nothing
+# needs to be edited here first.
+
 services:
   franchisefinder:
-    # Default: build from the source in this directory (what you get from
-    # `git clone`). To use the prebuilt image from GitHub Container Registry
-    # instead — no local build needed — comment out `build: .` and
-    # uncomment the `image:` line below, or use docker-compose.prebuilt.yml
-    # instead of this file (see the README's "Pull instead of build"
-    # section — no repo clone required at all with that option).
-    build: .
-    # image: ghcr.io/pyronsy/franchisefinder:latest
+    image: ghcr.io/pyronsy/franchisefinder:latest
     container_name: franchisefinder
     restart: unless-stopped
     ports:
       - "8420:8420"
-    env_file:
-      - .env
     volumes:
       - ./config:/config
       - ./data:/data
+    # Optional — pre-fills the Settings page with defaults instead of
+    # typing them into the browser. Everything below can be left out
+    # entirely and configured in-app instead; uncomment and fill in only
+    # what you want to set this way.
+    # environment:
+    #   - TMDB_API_KEY=
+    #   - MDBLIST_API_KEY=
+    #   - CHECK_INTERVAL_HOURS=24
+    #   - NOTIFY_URL=
 
   # Uncomment to run a local LLM instead of a cloud provider. Pick "Ollama"
   # as the provider on the Settings page and set Base URL to

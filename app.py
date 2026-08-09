@@ -106,7 +106,7 @@ LLM_PROVIDERS = {
         "label": "Google Gemini",
         "needs_key": True,
         "needs_base_url": False,
-        "default_model": "gemini-2.5-flash",
+        "default_model": "gemini-flash-latest",
     },
     "groq": {
         "label": "Groq",
@@ -491,7 +491,11 @@ If nothing is missing, respond with an empty array: []
     try:
         raw = call_llm(prompt, settings)
     except (requests.RequestException, ValueError) as exc:
-        log.warning("[%s] LLM call failed: %s", franchise["id"], exc)
+        log.warning(
+            "[%s] LLM call failed: %s",
+            franchise["id"],
+            _friendly_llm_error(exc, settings.get("provider", "")),
+        )
         return []
 
     suggestions = _extract_json_array(raw)
@@ -882,6 +886,29 @@ def settings_core_save():
     return redirect(url_for("settings_page", core_test_result="saved"))
 
 
+def _friendly_llm_error(exc: Exception, provider: str) -> str:
+    """
+    Adds an actionable hint for the most common failure mode: a model ID
+    that's been renamed or retired. LLM providers (Gemini especially)
+    change their current model lineup often enough that a hardcoded
+    default can go stale between app releases.
+    """
+    text = str(exc)
+    is_404 = isinstance(exc, requests.HTTPError) and getattr(exc.response, "status_code", None) == 404
+    is_404 = is_404 or "404" in text
+    if not is_404:
+        return f"Connection failed: {text}"
+
+    hints = {
+        "gemini": "Check https://ai.google.dev/gemini-api/docs/models for a current model ID, or clear the Model field to fall back to the default.",
+        "groq": "Check https://console.groq.com/docs/models for a current model ID, or clear the Model field to fall back to the default.",
+        "anthropic": "Check https://docs.claude.com/en/docs/about-claude/models for a current model ID, or clear the Model field to fall back to the default.",
+        "ollama": "Check that the model has been pulled on your Ollama server (docker exec -it ollama ollama pull <model>) and that the name matches exactly.",
+    }
+    hint = hints.get(provider, "The model ID may be wrong or retired — check the provider's current model list.")
+    return f"Connection failed (404 — model not found). This usually means the model ID is outdated. {hint}"
+
+
 @app.post("/settings/save")
 def settings_save():
     provider = request.form.get("provider", "none")
@@ -930,7 +957,11 @@ def settings_save():
             )
         except (requests.RequestException, ValueError) as exc:
             return redirect(
-                url_for("settings_page", test_result="error", test_message=f"Connection failed: {exc}")
+                url_for(
+                    "settings_page",
+                    test_result="error",
+                    test_message=_friendly_llm_error(exc, provider),
+                )
             )
 
     return redirect(url_for("settings_page", test_result="saved"))

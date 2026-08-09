@@ -19,80 +19,40 @@ Repo: https://github.com/pyronsy/FranchiseFinder
 
 ## Quick start
 
-**Option A — clone and build locally:**
-
-```bash
-git clone https://github.com/pyronsy/FranchiseFinder.git
-cd FranchiseFinder
-
-cp .env.example .env
-docker compose up -d --build
-```
-
-**Option B — pull the prebuilt image, from a full clone:**
-
-Images are published automatically from this repo via GitHub Actions on
-every push to `main`, tagged `ghcr.io/pyronsy/franchisefinder:latest`. If
-you've already cloned the repo, either edit `docker-compose.yml` (comment
-out `build: .`, uncomment the `image:` line), or just point at the
-dedicated compose file instead:
-
-```bash
-git clone https://github.com/pyronsy/FranchiseFinder.git
-cd FranchiseFinder
-
-docker compose -f docker-compose.prebuilt.yml pull
-docker compose -f docker-compose.prebuilt.yml up -d
-```
-
-**Option C — pull the prebuilt image, no clone at all:**
-
-`docker-compose.prebuilt.yml` doesn't reference any other file in the
-repo, so you can grab just that one file and skip cloning entirely:
+No git clone or local build — pull the published image and run it:
 
 ```bash
 mkdir franchisefinder && cd franchisefinder
-curl -O https://raw.githubusercontent.com/pyronsy/FranchiseFinder/main/docker-compose.prebuilt.yml
+curl -O https://raw.githubusercontent.com/pyronsy/FranchiseFinder/main/docker-compose.yml
 
-docker compose -f docker-compose.prebuilt.yml pull
-docker compose -f docker-compose.prebuilt.yml up -d
+docker compose pull
+docker compose up -d
 ```
 
 Docker creates `./config` and `./data` next to the compose file
-automatically on first run — nothing else to set up beforehand.
+automatically on first run — nothing else to set up beforehand. Images are
+published automatically from this repo via GitHub Actions on every push to
+`main`, tagged `ghcr.io/pyronsy/franchisefinder:latest`.
 
----
+Once it's running, open `http://<your-host>:8420`. You'll see a banner
+prompting you to add your TMDB and MDBList keys on the **Settings**
+page — that's the only required step before your first scan. After that,
+use **Manage Franchises** to add your first franchise from the browser —
+no config files to write by hand.
 
-`.env` can be left entirely blank in any of these — every credential and
-setting is configured from the browser after the container starts (see
-below). It only exists as an optional way to pre-fill defaults if you're
-scripting a deployment; Options B and C skip it entirely since nothing is
-required upfront.
-
-Whichever option you use, once it's running open `http://<your-host>:8420`.
-You'll see a banner prompting you to add your TMDB and MDBList keys on the
-**Settings** page — that's the only required step before your first scan.
-After that, use **Manage Franchises** to add your first franchise — no JSON
-editing required anywhere. (If you'd rather template a franchise by hand
-instead of the form, `cp config/franchises.example.json
-config/franchises.json` before starting the container and edit that
-instead — only available with Option A or B, since Option C doesn't have
-the repo's example file locally.)
+(If you'd rather start a franchise from a template instead of the form,
+the example config is in the repo at
+[`config/franchises.example.json`](config/franchises.example.json) — copy
+its contents into `config/franchises.json` yourself and edit that.)
 
 ## Updating
 
-**Local build (Option A):**
 ```bash
-git pull
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
-**Prebuilt image (Option B or C):**
-```bash
-docker compose -f docker-compose.prebuilt.yml pull
-docker compose -f docker-compose.prebuilt.yml up -d
-```
-Your `config/` and `data/` are untouched by an update either way — keys,
+`config/` and `data/` are untouched by an update — keys, franchises, and
 franchises, and pending/approved state all persist across image versions.
 
 ## Configuring everything from the web UI
@@ -247,6 +207,24 @@ aren't syncing correctly:
 Both log the raw response on failure. Cross-check against MDBList's current
 docs at https://api.mdblist.com/docs/ if you hit errors.
 
+## If the LLM connection test fails with a 404
+
+LLM providers rename and retire model IDs fairly often — Google in
+particular has moved through several Gemini generations, each with its own
+shutdown schedule for the last one. A 404 on **Save & test connection**
+almost always means the Model field (or the built-in default, if you left
+it blank) points at an ID that's since been renamed or retired, not a
+problem with your key.
+
+The error message includes a link to the provider's current model list —
+check it, update the Model field to a current ID, or clear the field
+entirely to fall back to the app's default (also worth checking isn't
+stale — model IDs can outlive an app release). Provider docs:
+
+- Gemini: https://ai.google.dev/gemini-api/docs/models
+- Groq: https://console.groq.com/docs/models
+- Anthropic: https://docs.claude.com/en/docs/about-claude/models
+
 ## Notifications (optional)
 
 Set a webhook URL (Discord webhook, ntfy topic URL, etc) in the **Settings**
@@ -254,18 +232,28 @@ page to get pinged whenever any franchise has new items awaiting approval.
 
 ## Project layout
 
+This section describes the repo source, for reference or if you're
+browsing/contributing — running FranchiseFinder doesn't require any of
+this locally, see Quick Start above.
+
 ```
 app.py                          # scan loop + Flask web UI
 templates/index.html            # approval queue page
 templates/franchises.html       # add/edit/delete franchises
 templates/settings.html         # TMDB/MDBList keys + LLM provider settings
-config/franchises.example.json  # copy to franchises.json, or manage via the UI
-config/settings.json            # all API keys/settings, written by the Settings page (git-ignored)
-data/                           # per-franchise pending/rejected state (git-ignored)
-Dockerfile
-docker-compose.yml              # local build (default) or prebuilt image, edit to switch
-docker-compose.prebuilt.yml     # standalone — pulls the prebuilt image, no clone needed
-.env.example                    # optional — everything can be left blank and set via the web UI instead
+config/franchises.example.json  # reference template for franchises.json (or just use the UI)
+Dockerfile                      # builds the image published to GHCR
+docker-compose.yml              # the file Quick Start has you curl and run
+.github/workflows/publish.yml   # builds & pushes the image to ghcr.io on every push to main
+.github/workflows/ci.yml        # syntax/build checks on push and PR
+```
+
+At runtime (not part of the repo), the container also uses:
+
+```
+config/settings.json            # all API keys/settings, written by the Settings page
+config/franchises.json          # your actual franchises, written by the Manage Franchises page
+data/                           # per-franchise pending/rejected approval state
 ```
 
 ## License
