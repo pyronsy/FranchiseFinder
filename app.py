@@ -612,7 +612,8 @@ def notify(message: str, notify_url: str) -> None:
         log.warning("Notify failed: %s", exc)
 
 
-def scan_franchise(franchise: dict, core: dict) -> None:
+def scan_franchise(franchise: dict, core: dict) -> dict:
+    """Returns {'new_count': int, 'error': str|None} for this franchise."""
     fid = franchise["id"]
     fname = franchise["name"]
     tmdb_api_key = core["tmdb_api_key"]
@@ -623,13 +624,13 @@ def scan_franchise(franchise: dict, core: dict) -> None:
         current = get_current_mdblist_tmdb_ids(franchise["mdblist_list_id"], mdblist_api_key)
     except requests.RequestException as exc:
         log.error("[%s] Could not fetch current MDBList items: %s", fid, exc)
-        return
+        return {"new_count": 0, "error": f"MDBList error for {fname}: {exc}"}
 
     try:
         candidates = discover_candidates(franchise, tmdb_api_key)
     except requests.RequestException as exc:
         log.error("[%s] Could not query TMDB: %s", fid, exc)
-        return
+        return {"new_count": 0, "error": f"TMDB error for {fname}: {exc}"}
 
     pending = load_pending(fid)
     rejected = load_rejected(fid)
@@ -690,8 +691,14 @@ def scan_franchise(franchise: dict, core: dict) -> None:
     else:
         log.info("[%s] No new candidates found.", fid)
 
+    return {"new_count": len(new_finds), "error": None}
 
-def run_scan() -> None:
+
+def run_scan() -> dict:
+    """
+    Runs one scan cycle across all franchises and returns a summary:
+    {'skipped': bool, 'franchise_count': int, 'total_new': int, 'errors': [str, ...]}
+    """
     with _lock:
         core = load_core_settings()
         if not core["tmdb_api_key"] or not core["mdblist_api_key"]:
@@ -699,9 +706,23 @@ def run_scan() -> None:
                 "Skipping scan — TMDB and/or MDBList API key not configured yet. "
                 "Set them on the Settings page."
             )
-            return
-        for franchise in load_franchises():
-            scan_franchise(franchise, core)
+            return {"skipped": True, "franchise_count": 0, "total_new": 0, "errors": []}
+
+        franchises = load_franchises()
+        total_new = 0
+        errors = []
+        for franchise in franchises:
+            result = scan_franchise(franchise, core)
+            total_new += result["new_count"]
+            if result["error"]:
+                errors.append(result["error"])
+
+        return {
+            "skipped": False,
+            "franchise_count": len(franchises),
+            "total_new": total_new,
+            "errors": errors,
+        }
 
 
 def scan_loop() -> None:
@@ -733,7 +754,15 @@ def index():
     core = load_core_settings()
     needs_setup = not core["tmdb_api_key"] or not core["mdblist_api_key"]
 
-    return render_template("index.html", groups=groups, total=total, needs_setup=needs_setup)
+    return render_template(
+        "index.html",
+        groups=groups,
+        total=total,
+        needs_setup=needs_setup,
+        scan_result=request.args.get("scan_result"),
+        scan_found=request.args.get("scan_found"),
+        scan_errors=request.args.get("scan_errors"),
+    )
 
 
 @app.post("/approve/<franchise_id>/<media_type>/<tmdb_id>")
@@ -766,8 +795,19 @@ def reject(franchise_id: str, media_type: str, tmdb_id: str):
 
 @app.post("/scan-now")
 def scan_now():
-    threading.Thread(target=run_scan, daemon=True).start()
-    return redirect(url_for("index"))
+    result = run_scan()
+
+    if result["skipped"]:
+        return redirect(url_for("index", scan_result="skipped"))
+
+    return redirect(
+        url_for(
+            "index",
+            scan_result="error" if result["errors"] else "done",
+            scan_found=result["total_new"],
+            scan_errors=" | ".join(result["errors"]) if result["errors"] else None,
+        )
+    )
 
 
 @app.get("/health")

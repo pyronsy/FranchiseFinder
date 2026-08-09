@@ -24,6 +24,10 @@
     nav { margin-bottom: 20px; }
     nav a { color: #7aa2f7; text-decoration: none; margin-right: 16px; font-size: 0.9rem; }
     nav a.active { color: #eee; font-weight: 600; }
+    .banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9rem; }
+    .banner-success { background: #1f4a26; border: 1px solid #2e7d32; color: #b7e6bd; }
+    .banner-neutral { background: #1f2f4a; border: 1px solid #2e4f7d; color: #b7cde6; }
+    .banner-error { background: #4a1f1f; border: 1px solid #6d1f1f; color: #f5b5b5; }
   </style>
 </head>
 <body>
@@ -42,7 +46,24 @@
     </p>
   {% endif %}
 
-  <form method="post" action="{{ url_for('scan_now') }}">
+  {% if scan_result == 'skipped' %}
+    <div class="banner banner-error">
+      Scan skipped — TMDB and/or MDBList keys aren't set. <a href="{{ url_for('settings_page') }}">Add them on the Settings page</a>.
+    </div>
+  {% elif scan_result == 'error' %}
+    <div class="banner banner-error">
+      Scan finished with errors: {{ scan_errors }}
+      {% if scan_found and scan_found|int > 0 %} (still found {{ scan_found }} new item{{ 's' if scan_found|int != 1 else '' }} from the franchises that did work){% endif %}
+    </div>
+  {% elif scan_result == 'done' %}
+    {% if scan_found and scan_found|int > 0 %}
+      <div class="banner banner-success">Scan complete — found {{ scan_found }} new item{{ 's' if scan_found|int != 1 else '' }}, listed below.</div>
+    {% else %}
+      <div class="banner banner-neutral">Scan complete — nothing new found.</div>
+    {% endif %}
+  {% endif %}
+
+  <form method="post" action="{{ url_for('scan_now') }}" onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = 'Scanning… this can take a moment';">
     <button class="scan" type="submit">Scan all franchises now</button>
   </form>
 
