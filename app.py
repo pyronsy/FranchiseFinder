@@ -722,16 +722,36 @@ def matches_tmdb_filter(media_type: str, tmdb_id: str, tmdb_filter: dict, tmdb_a
 
 
 def _extract_json_array(text: str):
-    """LLMs sometimes wrap JSON in prose or code fences — pull out the array."""
+    """
+    LLMs sometimes wrap JSON in prose or code fences — pull out the array.
+    Also handles a model wrapping the array in an object (e.g.
+    {"results": [...]}) despite being told not to, which some models do
+    regardless of instructions — this is a real failure mode seen in
+    practice, not just a theoretical one.
+    """
     start = text.find("[")
     end = text.rfind("]")
-    if start == -1 or end == -1 or end < start:
-        return []
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: the whole response might parse as a JSON object with the
+    # array nested inside one of its values instead of at the top level.
     try:
-        return json.loads(text[start : end + 1])
+        obj = json.loads(text)
     except json.JSONDecodeError:
-        log.warning("Could not parse LLM JSON output")
-        return []
+        obj = None
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        for value in obj.values():
+            if isinstance(value, list):
+                return value
+
+    log.warning("Could not parse LLM JSON output: %s", text[:300])
+    return []
 
 
 def llm_classify_plex_batch(franchise: dict, titles_batch: list) -> list:
@@ -782,6 +802,22 @@ listed above exactly.
             len(parsed),
             len(titles_batch),
             raw[:300],
+        )
+    elif not any(
+        isinstance(p, dict)
+        and (p.get("belongs") is True or (isinstance(p.get("belongs"), str) and p.get("belongs").strip().lower() == "true"))
+        for p in parsed
+    ):
+        # Parsed cleanly and the right length, but classified nothing as a
+        # match — log the raw response so a genuinely-empty result (correct
+        # for this batch) can be told apart from a systematic issue (wrong
+        # llm_hint, model being overly conservative, etc) without needing
+        # to reproduce the problem again.
+        log.info(
+            "LLM Plex classification found 0 matches in this %d-title batch for %r. Raw response: %s",
+            len(titles_batch),
+            franchise["name"],
+            raw[:500],
         )
 
     return parsed
@@ -1329,8 +1365,20 @@ def plex_scan():
         and f"{i['media_type']}:{i['tmdb_id']}" not in pending
         and f"{i['media_type']}:{i['tmdb_id']}" not in rejected
     ]
+    already_excluded_count = len(checkable) - len(to_check)
+
+    log.info(
+        "[%s] Plex scan funnel: fetched=%d resolved_to_tmdb=%d "
+        "already_listed_or_queued_or_rejected=%d to_check=%d",
+        franchise["id"],
+        len(plex_items),
+        len(checkable),
+        already_excluded_count,
+        len(to_check),
+    )
 
     new_finds = []
+    llm_batch_failures = 0
 
     if is_llm_only:
         if load_llm_settings().get("provider", "none") == "none":
@@ -1348,6 +1396,7 @@ def plex_scan():
                 classifications = llm_classify_plex_batch(franchise, batch)
             except (requests.RequestException, ValueError) as exc:
                 log.warning("[%s] Plex LLM classification failed: %s", franchise["id"], exc)
+                llm_batch_failures += 1
                 continue
             for idx, plex_item in enumerate(batch):
                 c = classifications[idx] if idx < len(classifications) else None
@@ -1397,9 +1446,17 @@ def plex_scan():
     if new_finds:
         save_pending(franchise["id"], pending)
 
-    msg = f"Checked {len(plex_items)} Plex item(s) — found {len(new_finds)} match(es) for {franchise['name']}, added to Approvals."
+    msg = (
+        f"Checked {len(plex_items)} Plex item(s) from this library — "
+        f"{len(checkable)} resolved to a TMDB ID, "
+        f"{already_excluded_count} already in the list/queue/rejected, "
+        f"{len(to_check)} actually checked against {franchise['name']}, "
+        f"found {len(new_finds)} match(es), added to Approvals."
+    )
     if unresolved_count:
-        msg += f" ({unresolved_count} item(s) had no TMDB match and were skipped.)"
+        msg += f" {unresolved_count} item(s) had no TMDB match and were skipped."
+    if llm_batch_failures:
+        msg += f" {llm_batch_failures} LLM batch(es) failed and were skipped — check the app logs."
     return redirect(url_for("plex_page", scan_result="done", scan_message=msg))
 
 

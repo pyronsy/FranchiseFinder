@@ -147,6 +147,28 @@ very old legacy-agent libraries) get one title/year search against TMDB
 as a fallback; if that doesn't resolve either, they're skipped and the
 result message tells you how many were skipped that way.
 
+### If a scan finds zero matches
+
+The result message breaks down the full funnel — items fetched from Plex,
+how many resolved to a TMDB ID, how many were already in the target
+list/queue/rejected, how many were actually checked, and how many
+matched. That breakdown usually tells you exactly where the count drops
+to zero without needing to guess:
+
+- **Fetched is 0** — wrong library selected, or Plex isn't returning
+  results for that library key.
+- **Resolved is much lower than fetched** — many items lack a TMDB-linked
+  GUID in Plex's metadata; check the app logs for per-item resolution
+  failures.
+- **Already-excluded accounts for most/all of it** — expected behavior,
+  not a bug: those items are already in the target MDBList list or
+  already sitting in your Approvals/Rejected queues.
+- **Checked is nonzero but matches is 0** — for LLM-only franchises, check
+  the app logs: a 0-match batch that parsed cleanly gets logged at info
+  level with the raw LLM response, so you can see whether the model
+  genuinely found nothing or is being unexpectedly conservative (often
+  fixable by tightening or loosening the franchise's `llm_hint`).
+
 ## Getting API keys
 
 - **TMDB**: https://www.themoviedb.org/settings/api (free, no card)
