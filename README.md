@@ -132,8 +132,16 @@ scraping ever would be.
 
 Quick Add requires an LLM provider configured on the Settings page first
 — refuses to create a franchise that would never find anything otherwise.
-Franchises you've already added show an **already added** badge and a
-disabled button so you don't accidentally create duplicates.
+Franchises you've already added are filtered out of the browsable list
+entirely (not just badged) so the list only ever shows things you might
+actually still want.
+
+**Ignore** permanently hides a catalog entry you're never going to want,
+without adding it as a franchise — stored separately from the Wikipedia
+cache itself (`data/wikipedia_catalog_ignored.json`), so refreshing from
+Wikipedia never un-hides something you've dismissed. Ignored entries
+collapse into an **Ignored (N)** section at the bottom of the page, each
+with an **Un-ignore** button if you change your mind.
 
 The catalog is cached locally (`data/wikipedia_franchise_catalog.json`)
 after the first load — **Refresh from Wikipedia** forces a re-fetch if
@@ -499,6 +507,7 @@ config/franchises.json          # your actual franchises, written by the Manage 
 data/                           # per-franchise pending/rejected approval state
 data/plex_library.json          # stored Plex snapshot + per-franchise checked notations
 data/wikipedia_franchise_catalog.json  # cached Wikipedia franchise catalog
+data/wikipedia_catalog_ignored.json    # catalog entries you've dismissed with Ignore
 ```
 
 ## License

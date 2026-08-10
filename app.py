@@ -894,6 +894,7 @@ WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
 WIKIPEDIA_FRANCHISE_LIST_TITLE = "Lists_of_multimedia_franchises"
 WIKIPEDIA_USER_AGENT = "FranchiseFinder/1.0 (https://github.com/pyronsy/FranchiseFinder; self-hosted Plex collection curator)"
 WIKIPEDIA_CATALOG_FILE_NAME = "wikipedia_franchise_catalog.json"
+WIKIPEDIA_CATALOG_IGNORED_FILE_NAME = "wikipedia_catalog_ignored.json"
 
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:\|([^\]]+))?\]\]")
 _WIKI_IGNORED_PREFIXES = {"File", "Category", "Special", "Help", "Wikipedia", "Template", "Portal"}
@@ -947,6 +948,19 @@ def load_wikipedia_catalog_cache() -> dict:
 def save_wikipedia_catalog_cache(data: dict) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     _save(DATA_DIR / WIKIPEDIA_CATALOG_FILE_NAME, data)
+
+
+def load_ignored_catalog_entries() -> dict:
+    """Returns {wiki_url_lowercase: {name, ignored_at}} — entries the user has
+    dismissed from the catalog page. Persists across refreshes and restarts,
+    separate from the catalog cache itself so refreshing from Wikipedia never
+    clears what's been ignored."""
+    return _load(DATA_DIR / WIKIPEDIA_CATALOG_IGNORED_FILE_NAME)
+
+
+def save_ignored_catalog_entries(data: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _save(DATA_DIR / WIKIPEDIA_CATALOG_IGNORED_FILE_NAME, data)
 
 
 def _parse_franchise_catalog_wikitext(wikitext: str) -> list:
@@ -2246,16 +2260,57 @@ def catalog_page():
         if cache.get("franchises"):
             error += " Showing your last cached copy."
 
+    all_franchises = cache.get("franchises", [])
     existing_names = {f["name"].strip().lower() for f in load_franchises()}
+    ignored = load_ignored_catalog_entries()
+
+    visible_franchises = [
+        f
+        for f in all_franchises
+        if f["name"].strip().lower() not in existing_names
+        and f["wiki_url"].lower() not in ignored
+    ]
+    already_added_count = sum(1 for f in all_franchises if f["name"].strip().lower() in existing_names)
+
+    ignored_list = sorted(ignored.values(), key=lambda i: i["name"].lower())
 
     return render_template(
         "catalog.html",
-        franchises=cache.get("franchises", []),
+        franchises=visible_franchises,
+        total_loaded=len(all_franchises),
+        already_added_count=already_added_count,
+        ignored_list=ignored_list,
         fetched_at=cache.get("fetched_at"),
-        existing_names=existing_names,
         error=error or request.args.get("error"),
         notice=request.args.get("notice"),
     )
+
+
+@app.post("/catalog/ignore")
+def catalog_ignore():
+    name = request.form.get("name", "").strip()
+    wiki_url = request.form.get("wiki_url", "").strip()
+    if not name or not wiki_url:
+        return redirect(url_for("catalog_page", error="Missing franchise name or link."))
+
+    ignored = load_ignored_catalog_entries()
+    ignored[wiki_url.lower()] = {
+        "name": name,
+        "wiki_url": wiki_url,
+        "ignored_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_ignored_catalog_entries(ignored)
+    return redirect(url_for("catalog_page"))
+
+
+@app.post("/catalog/unignore")
+def catalog_unignore():
+    wiki_url = request.form.get("wiki_url", "").strip().lower()
+    ignored = load_ignored_catalog_entries()
+    if wiki_url in ignored:
+        del ignored[wiki_url]
+        save_ignored_catalog_entries(ignored)
+    return redirect(url_for("catalog_page"))
 
 
 @app.post("/catalog/refresh")
