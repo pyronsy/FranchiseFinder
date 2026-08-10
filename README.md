@@ -211,15 +211,22 @@ on a free tier with a short `CHECK_INTERVAL_HOURS`.
 
 ## If MDBList calls fail
 
-MDBList's exact field/endpoint shapes have shifted over time across
-versions. Two functions in `app.py` are the ones to check first if items
-aren't syncing correctly:
+**Reading** a list (`get_current_mdblist_tmdb_ids()`) uses MDBList's
+confirmed `GET /lists/{id}/items` endpoint and response shape — this part
+is stable and shouldn't need adjustment.
 
-- `get_current_mdblist_tmdb_ids()` — reads an existing list
-- `add_item_to_mdblist()` — pushes an approved item
-
-Both log the raw response on failure. Cross-check against MDBList's current
-docs at https://api.mdblist.com/docs/ if you hit errors.
+**Adding** an approved item (`add_item_to_mdblist()`) is the one part of
+this integration MDBList's public docs don't fully confirm — their Apiary
+reference lists a single "Modify Static List Items" endpoint but the exact
+path/method aren't reliably documented. Rather than hardcode one guess,
+the app tries a few plausible variants in order (`POST`/`PUT` against
+`/lists/{id}/items`, with and without a trailing `/add`), remembers
+whichever one actually works for your account, and only re-probes if that
+stops working later. If **all** variants fail, the item stays safely in
+your approval queue (nothing is lost) and a red banner explains it —
+check the app logs at that point for exactly which response each attempt
+got back, and cross-check against MDBList's current docs at
+https://api.mdblist.com/docs/ or https://mdblist.docs.apiary.io/.
 
 ## If the LLM connection test fails with a 404
 

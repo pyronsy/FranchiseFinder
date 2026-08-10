@@ -607,32 +607,120 @@ def get_current_mdblist_tmdb_ids(list_id: str, mdblist_api_key: str):
     return ids
 
 
+# Cache of (endpoint_template, method) that has already been confirmed to
+# work, so we don't re-probe every single approval once we know the right
+# one for this MDBList API version.
+_mdblist_add_endpoint_cache = {"template": None, "method": None}
+
+
+def _try_mdblist_add(template: str, method: str, list_id: str, mdblist_api_key: str, payload: dict):
+    """Attempts one (path, method) combination. Returns (success, response) — response is
+    the requests.Response on a network-level success (even if MDBList reported an error in
+    the JSON body), or None if the request itself failed to complete."""
+    url = template.format(base=MDBLIST_BASE, list_id=list_id)
+    try:
+        if method == "POST":
+            resp = requests.post(url, params={"apikey": mdblist_api_key}, json=payload, timeout=30)
+        else:
+            resp = requests.put(url, params={"apikey": mdblist_api_key}, json=payload, timeout=30)
+    except requests.RequestException as exc:
+        log.debug("MDBList add attempt failed (%s %s): %s", method, url, exc)
+        return False, None
+
+    if resp.status_code == 404:
+        log.debug("MDBList add attempt got 404 (%s %s) — trying next variant", method, url)
+        return False, resp
+
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+
+    # MDBList's confirmed response shape for a successful modify is
+    # {"added": {...}, "existing": {...}, "not_found": {...}} with counts
+    # per category. Some error responses come back 200 with an "error" key.
+    if resp.ok and isinstance(data, dict) and "error" not in data:
+        return True, resp
+
+    log.debug(
+        "MDBList add attempt returned non-success (%s %s) status=%s body=%s",
+        method,
+        url,
+        resp.status_code,
+        resp.text[:300],
+    )
+    return False, resp
+
+
 def add_item_to_mdblist(list_id: str, media_type: str, tmdb_id: str, mdblist_api_key: str) -> bool:
     """
-    NOTE: payload shape follows MDBList's documented static-list add
-    pattern as of writing. If this fails, check the logged response body
-    against https://api.mdblist.com/docs/.
+    Adds one item to an MDBList static list.
+
+    MDBList's own Apiary docs list a single "Modify Static List Items"
+    endpoint under Static Lists (not separate add/remove URLs), but the
+    exact path and HTTP method aren't confirmable from the published docs
+    at the time of writing. Rather than hardcode one guess, this tries the
+    most plausible variants in order, remembers whichever one actually
+    works (module-level cache), and only probes again if the cached one
+    stops working — e.g. after an MDBList API change.
+
+    If NONE of the variants work, check the debug-level logs for what each
+    attempt returned, and cross-check against https://api.mdblist.com/docs/
+    or https://mdblist.docs.apiary.io/ for the current spec.
     """
     key = "movies" if media_type == "movie" else "shows"
     payload = {key: [{"tmdb": int(tmdb_id)}]}
-    resp = requests.post(
-        f"{MDBLIST_BASE}/lists/{list_id}/items/add",
-        params={"apikey": mdblist_api_key},
-        json=payload,
-        timeout=30,
-    )
-    if not resp.ok:
+
+    candidates = [
+        ("{base}/lists/{list_id}/items", "POST"),
+        ("{base}/lists/{list_id}/items", "PUT"),
+        ("{base}/lists/{list_id}/items/", "POST"),
+        ("{base}/lists/{list_id}/items/add", "POST"),
+    ]
+
+    # Try the previously-confirmed variant first, if we have one.
+    cached = _mdblist_add_endpoint_cache
+    if cached["template"] and (cached["template"], cached["method"]) in candidates:
+        candidates.remove((cached["template"], cached["method"]))
+        candidates.insert(0, (cached["template"], cached["method"]))
+
+    last_resp = None
+    for template, method in candidates:
+        ok, resp = _try_mdblist_add(template, method, list_id, mdblist_api_key, payload)
+        last_resp = resp or last_resp
+        if ok:
+            cached["template"], cached["method"] = template, method
+            log.info(
+                "Added %s:%s to MDBList list %s (via %s %s)",
+                media_type,
+                tmdb_id,
+                list_id,
+                method,
+                template,
+            )
+            return True
+
+    # Nothing worked — log the most informative failure we saw.
+    if last_resp is not None:
         log.error(
-            "MDBList add failed (%s) for list=%s %s:%s -> %s",
-            resp.status_code,
+            "MDBList add failed for list=%s %s:%s after trying %d endpoint variant(s) — "
+            "last response (%s): %s. Cross-check against https://api.mdblist.com/docs/",
             list_id,
             media_type,
             tmdb_id,
-            resp.text[:500],
+            len(candidates),
+            last_resp.status_code,
+            last_resp.text[:500],
         )
-        return False
-    log.info("Added %s:%s to MDBList list %s", media_type, tmdb_id, list_id)
-    return True
+    else:
+        log.error(
+            "MDBList add failed for list=%s %s:%s — no endpoint variant even got a response "
+            "(network/connection issue). Check MDBLIST_BASE reachability and your API key.",
+            list_id,
+            media_type,
+            tmdb_id,
+        )
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -879,6 +967,18 @@ def approve(franchise_id: str, media_type: str, tmdb_id: str):
         ok = add_item_to_mdblist(franchise["mdblist_list_id"], media_type, tmdb_id, mdblist_api_key)
         if not ok:
             pending[key] = item  # don't lose it if the push failed
+            save_pending(franchise_id, pending)
+            return redirect(
+                url_for(
+                    "index",
+                    scan_result="error",
+                    scan_errors=(
+                        f"Couldn't add {item['title']} to MDBList — the item stayed in your "
+                        f"approval queue so you haven't lost it. Check the app logs for the "
+                        f"MDBList response and see the README's MDBList troubleshooting section."
+                    ),
+                )
+            )
         save_pending(franchise_id, pending)
     return redirect(url_for("index"))
 
