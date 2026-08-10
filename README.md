@@ -132,7 +132,10 @@ depends on that franchise's `tmdb_filter`:
   uses, just checked in the opposite direction.
 - **none (LLM only)** — titles are sent to your configured LLM in
   batches (25 at a time, not one call per title) to judge which ones
-  genuinely belong, the same way the normal gap-finding pass does.
+  genuinely belong. The LLM classifies every title in the batch, in
+  order — matches are identified by position, not by matching the
+  LLM's returned text back to Plex's title string, since models often
+  paraphrase titles slightly when echoing them back.
 
 Either way, items already in the target MDBList list, already pending, or
 already rejected are skipped automatically. Each run checks up to 500

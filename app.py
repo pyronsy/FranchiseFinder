@@ -736,13 +736,20 @@ def _extract_json_array(text: str):
 
 def llm_classify_plex_batch(franchise: dict, titles_batch: list) -> list:
     """
-    For "none"-type (LLM-only) franchises, asks the LLM which titles in a
-    batch from the Plex library genuinely belong to this franchise.
-    Returns [{title, reasoning}] for matches only. Batched (not one call
-    per title) to keep this affordable against a large library.
+    For "none"-type (LLM-only) franchises, asks the LLM to classify every
+    title in a batch from the Plex library, in order. Returns EXACTLY one
+    {"belongs": bool, "reasoning": str} entry per input title, aligned by
+    POSITION — not matched back by title text. LLMs commonly paraphrase a
+    title slightly when echoing it (drop a subtitle, reformat the year,
+    change punctuation), which silently broke matching in an earlier
+    version of this function; positional alignment avoids that entirely,
+    the same way the main gap-finding pass's filter annotations work.
+
+    Batched (not one call per title) to keep this affordable against a
+    large library.
     """
     settings = load_llm_settings()
-    if settings.get("provider", "none") == "none":
+    if settings.get("provider", "none") == "none" or not titles_batch:
         return []
 
     titles_block = "\n".join(f"- {t['title']} ({t['year']})" for t in titles_batch)
@@ -753,18 +760,31 @@ franchise "{franchise['name']}".
 
 {hint}
 
-Titles to check:
+Titles to check, in order:
 {titles_block}
 
-Respond with ONLY a JSON array (no prose, no markdown fences) listing ONLY
-the titles above that genuinely belong to this franchise, in this shape:
-[{{"title": "...", "reasoning": "one short sentence"}}]
+Respond with ONLY a JSON array (no prose, no markdown fences) containing
+EXACTLY one entry per title above, in the exact same order — this is
+required even for titles that don't belong. Each entry:
+{{"belongs": true or false, "reasoning": "one short sentence"}}
 
-If none of them belong, respond with an empty array: []
+Set "belongs" to true only for titles you are confident genuinely belong
+to this franchise. The array length must match the number of titles
+listed above exactly.
 """
     raw = call_llm(prompt, settings)
     parsed = _extract_json_array(raw)
-    return [p for p in parsed if isinstance(p, dict) and p.get("title")]
+
+    if len(parsed) != len(titles_batch):
+        log.warning(
+            "LLM Plex classification returned %d entries for a %d-title batch — "
+            "results may be misaligned for this batch. Raw response: %s",
+            len(parsed),
+            len(titles_batch),
+            raw[:300],
+        )
+
+    return parsed
 
 
 # --------------------------------------------------------------------------
@@ -1325,14 +1345,19 @@ def plex_scan():
         for i in range(0, len(to_check), batch_size):
             batch = to_check[i : i + batch_size]
             try:
-                matches = llm_classify_plex_batch(franchise, batch)
+                classifications = llm_classify_plex_batch(franchise, batch)
             except (requests.RequestException, ValueError) as exc:
                 log.warning("[%s] Plex LLM classification failed: %s", franchise["id"], exc)
                 continue
-            matched_titles = {m["title"].strip().lower(): m.get("reasoning", "") for m in matches}
-            for plex_item in batch:
-                reasoning = matched_titles.get(plex_item["title"].strip().lower())
-                if reasoning is None:
+            for idx, plex_item in enumerate(batch):
+                c = classifications[idx] if idx < len(classifications) else None
+                if not isinstance(c, dict):
+                    continue
+                belongs = c.get("belongs")
+                belongs = belongs is True or (
+                    isinstance(belongs, str) and belongs.strip().lower() == "true"
+                )
+                if not belongs:
                     continue
                 key = f"{plex_item['media_type']}:{plex_item['tmdb_id']}"
                 item = {
@@ -1341,7 +1366,7 @@ def plex_scan():
                     "title": plex_item["title"],
                     "year": plex_item["year"],
                     "source": "plex",
-                    "reasoning": reasoning or "Matched by the LLM against your Plex library.",
+                    "reasoning": c.get("reasoning") or "Matched by the LLM against your Plex library.",
                     "llm_reasoning": True,
                     "imdb_id": get_imdb_id(plex_item["media_type"], plex_item["tmdb_id"], core["tmdb_api_key"]),
                 }
