@@ -51,7 +51,7 @@ app = Flask(__name__)
 _lock = threading.Lock()
 _config_lock = threading.Lock()
 
-VALID_FILTER_TYPES = {"company", "keyword", "network"}
+VALID_FILTER_TYPES = {"company", "keyword", "network", "none"}
 
 
 def load_franchises() -> list:
@@ -245,7 +245,9 @@ def save_rejected(franchise_id: str, data: dict) -> None:
 
 def _discover_param(tmdb_filter: dict, media_type: str):
     ftype = tmdb_filter["type"]
-    fid = tmdb_filter["id"]
+    fid = tmdb_filter.get("id")
+    if ftype == "none":
+        return None
     if ftype == "company":
         return ("with_companies", fid)
     if ftype == "keyword":
@@ -845,7 +847,13 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
         filter_matched.append(item)
 
     # --- LLM pass: annotate filter matches + find gaps ---------------------
-    if load_llm_settings().get("provider", "none") != "none":
+    llm_enabled = load_llm_settings().get("provider", "none") != "none"
+    if franchise["tmdb_filter"]["type"] == "none" and not llm_enabled:
+        warnings.append(
+            f"{fname} is set to \"None (LLM only)\" but no LLM provider is configured — "
+            f"this franchise can't find anything until you set one on the Settings page."
+        )
+    if llm_enabled:
         # Build a plain-title view of what the LLM should treat as "already have":
         # current list contents + everything already sitting in the pending queue
         # (including what the filter pass just added above).
@@ -1341,11 +1349,20 @@ def _parse_franchise_form(form, existing_ids: set, editing_id: str = None) -> di
 
     filter_type = form.get("filter_type", "").strip()
     if filter_type not in VALID_FILTER_TYPES:
-        raise ValueError("Filter type must be company, keyword, or network.")
+        raise ValueError("Filter type must be company, keyword, network, or none.")
 
     filter_id_raw = form.get("filter_id", "").strip()
-    if not filter_id_raw.isdigit():
-        raise ValueError("Filter ID must be a number (TMDB company/keyword/network ID).")
+    if filter_type == "none":
+        if load_llm_settings().get("provider", "none") == "none":
+            raise ValueError(
+                "\"None (LLM only)\" requires an LLM provider to be configured on the "
+                "Settings page first — otherwise this franchise would never find anything."
+            )
+        filter_id = 0
+    else:
+        if not filter_id_raw.isdigit():
+            raise ValueError("Filter ID must be a number (TMDB company/keyword/network ID).")
+        filter_id = int(filter_id_raw)
 
     exclude_keywords = [
         kw.strip() for kw in form.get("exclude_title_keywords", "").split(",") if kw.strip()
@@ -1364,7 +1381,7 @@ def _parse_franchise_form(form, existing_ids: set, editing_id: str = None) -> di
         "id": franchise_id,
         "name": name,
         "mdblist_list_id": mdblist_list_id,
-        "tmdb_filter": {"type": filter_type, "id": int(filter_id_raw)},
+        "tmdb_filter": {"type": filter_type, "id": filter_id},
         "exclude_title_keywords": exclude_keywords,
         "exclude_tmdb_ids": exclude_ids,
         "llm_hint": llm_hint,

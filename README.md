@@ -143,6 +143,17 @@ Each entry in `config/franchises.json` looks like:
     `/search/keyword` in the API.
   - `"network"` — matches a TV network ID (TV only, ignored for movies).
     Useful for franchises anchored to one streaming service.
+  - `"none"` — **skips the TMDB filter entirely.** No `discover` call
+    happens at all; every suggestion comes purely from the LLM's
+    gap-finding pass instead. Use this when a franchise is too scattered
+    across studios/keywords for any single TMDB filter to catch reliably
+    (an anthology series, a loosely-connected shared universe, a
+    franchise TMDB just doesn't tag consistently). **Requires an LLM
+    provider configured on the Settings page** — the app refuses to save
+    a franchise as `"none"` without one, since it would otherwise never
+    find anything. Works best paired with a specific `llm_hint`, since
+    the LLM is now doing 100% of the discovery work rather than just
+    annotating/supplementing a filter's results.
 - **exclude_title_keywords** — titles containing any of these (case-insensitive)
   are skipped. Documentary-genre titles are always skipped automatically.
 - **exclude_tmdb_ids** — permanently ignore specific titles, format
@@ -229,6 +240,12 @@ call fails, or it just doesn't annotate a particular title, that item
 falls back to a plain, deterministic explanation of which TMDB filter
 matched it instead (shown in a plainer grey rather than the italic blue
 used for actual LLM reasoning, so you can tell the two apart at a glance).
+
+For a franchise with `tmdb_filter.type` set to `"none"`, step 1 above is
+always empty (there's nothing for the filter to have found), so every
+item that shows up comes from step 2 tagged **LLM suggested** — this is
+the intended way to bypass an overly narrow TMDB filter entirely for a
+specific franchise, as opposed to disabling the LLM step globally.
 
 This runs *in addition to* the TMDB filter, not instead of it. Leaving the
 provider set to **Disabled** (the default) skips the LLM step entirely —

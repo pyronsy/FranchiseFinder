@@ -56,7 +56,7 @@
         <div class="meta">
           <span class="name">{{ f.name }}</span>
           <span class="sub">
-            id: {{ f.id }} · filter: {{ f.tmdb_filter.type }} {{ f.tmdb_filter.id }} · MDBList list {{ f.mdblist_list_id }}
+            id: {{ f.id }} · filter: {{ 'none (LLM only)' if f.tmdb_filter.type == 'none' else f.tmdb_filter.type ~ ' ' ~ f.tmdb_filter.id }} · MDBList list {{ f.mdblist_list_id }}
           </span>
           {% if f.llm_hint %}
             <span class="hint">LLM hint: {{ f.llm_hint }}</span>
@@ -165,24 +165,47 @@
       <div>
         <label>
           TMDB filter type
-          <select name="filter_type">
+          <select name="filter_type" id="filter-type-select">
             <option value="company" {{ 'selected' if editing and editing.tmdb_filter.type == 'company' }}>Company / studio</option>
             <option value="keyword" {{ 'selected' if editing and editing.tmdb_filter.type == 'keyword' }}>Keyword</option>
             <option value="network" {{ 'selected' if editing and editing.tmdb_filter.type == 'network' }}>TV network</option>
+            <option value="none" {{ 'selected' if editing and editing.tmdb_filter.type == 'none' }}>None (LLM only)</option>
           </select>
         </label>
       </div>
-      <div>
+      <div id="filter-id-field">
         <label>
           TMDB filter ID
-          <input type="text" name="filter_id" required placeholder="e.g. 420"
-                 value="{{ editing.tmdb_filter.id if editing else '' }}">
+          <input type="text" name="filter_id" id="filter-id-input" required placeholder="e.g. 420"
+                 value="{{ editing.tmdb_filter.id if editing and editing.tmdb_filter.type != 'none' else '' }}">
         </label>
       </div>
     </div>
-    <div class="hint-text">
+    <div class="hint-text" id="filter-type-hint">
       Find IDs on TMDB's website: a studio/company page, a title's Keywords tab, or a network page — the ID is in the URL.
     </div>
+
+    <script>
+      (function () {
+        const select = document.getElementById('filter-type-select');
+        const idField = document.getElementById('filter-id-field');
+        const idInput = document.getElementById('filter-id-input');
+        const hint = document.getElementById('filter-type-hint');
+
+        const NONE_HINT = 'No TMDB filter runs at all \u2014 every suggestion comes from the LLM\u2019s gap-finding pass instead. Requires an LLM provider to be configured on the Settings page, and works best with a specific llm_hint below so the model knows exactly what counts.';
+        const NORMAL_HINT = "Find IDs on TMDB's website: a studio/company page, a title's Keywords tab, or a network page \u2014 the ID is in the URL.";
+
+        function update() {
+          const isNone = select.value === 'none';
+          idField.style.display = isNone ? 'none' : '';
+          idInput.required = !isNone;
+          hint.textContent = isNone ? NONE_HINT : NORMAL_HINT;
+        }
+
+        select.addEventListener('change', update);
+        update();
+      })();
+    </script>
 
     <label>
       Exclude title keywords <span class="hint-text">(comma-separated, optional)</span>
