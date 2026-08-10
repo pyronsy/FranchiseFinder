@@ -28,6 +28,7 @@
     .banner-success { background: #1f4a26; border: 1px solid #2e7d32; color: #b7e6bd; }
     .banner-neutral { background: #1f2f4a; border: 1px solid #2e4f7d; color: #b7cde6; }
     .banner-error { background: #4a1f1f; border: 1px solid #6d1f1f; color: #f5b5b5; }
+    .banner-warning { background: #4a3f1f; border: 1px solid #7d6a2e; color: #e6d5b7; }
   </style>
 </head>
 <body>
@@ -63,6 +64,10 @@
     {% endif %}
   {% endif %}
 
+  {% if scan_warnings %}
+    <div class="banner banner-warning">{{ scan_warnings }}</div>
+  {% endif %}
+
   <form method="post" action="{{ url_for('scan_now') }}" onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = 'Scanning… this can take a moment';">
     <button class="scan" type="submit">Scan all franchises now</button>
   </form>
@@ -81,6 +86,9 @@
               {{ item.title }} ({{ item.year }})
               {% if item.source == 'llm' %}
                 <span class="badge badge-llm">LLM suggested</span>
+              {% elif item.reasoning %}
+                <span class="badge badge-filter">filter match</span>
+                <span class="badge badge-llm">+ LLM reasoning</span>
               {% else %}
                 <span class="badge badge-filter">filter match</span>
               {% endif %}

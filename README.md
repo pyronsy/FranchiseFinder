@@ -157,9 +157,12 @@ get a working key in a couple of minutes.
 No account or key needed — see the "Running the LLM step fully local"
 section below instead.
 
-Free tiers are rate-limited and change over time — if you hit a cap,
-Settings will surface the error next time the app tries a call, and the
-gap-finding pass just skips that cycle rather than breaking anything else.
+Free tiers are rate-limited and change over time. If a scan hits a cap
+mid-run, the app shows a yellow warning banner on the Approvals page (e.g.
+"Groq rate limit or quota reached... gap-finding was skipped this cycle")
+rather than failing silently — the TMDB filter results for that scan are
+unaffected either way, only the LLM's reasoning/gap-finding step skips
+until the next cycle.
 
 ### Running the LLM step fully local (no external API)
 
@@ -170,19 +173,22 @@ gap-finding pass just skips that cycle rather than breaking anything else.
    and base URL to `http://ollama:11434` (the default)
 5. Save & test connection
 
-Once configured, every scan cycle adds a second pass per franchise:
+Once configured, every scan cycle adds one combined LLM call per
+franchise that does two things at once:
 
-1. The app sends the LLM the franchise name, your `llm_hint`, and the
-   titles currently in the list (plus anything already pending/rejected).
-2. It asks the LLM what's missing — genuinely part of the franchise but
-   not yet in the list.
-3. Each suggestion is looked up on TMDB by title/year to get a real TMDB
-   ID. Suggestions that don't resolve to a confident TMDB match are
-   skipped and logged.
-4. Anything that resolves gets added to the same approval queue as
-   filter-matched items, tagged **LLM suggested** with the model's short
-   reasoning shown next to it, so you can judge for yourself before
-   approving.
+1. **Annotates the TMDB filter's own results** — every title the
+   company/keyword filter just found gets a one-sentence reasoning from
+   the LLM explaining why it belongs (or flagging if it looks like a bad
+   match). These show up in the approval queue as **filter match + LLM
+   reasoning**, right alongside titles the filter found on its own with
+   no reasoning attached (LLM disabled, or that one title wasn't
+   annotated).
+2. **Finds genuine gaps** — anything legitimately part of the franchise
+   but missing from both the current list and this cycle's filter
+   results, including recent/upcoming releases. Each suggestion is
+   resolved against TMDB by title/year to get a real TMDB ID; anything
+   that doesn't resolve to a confident match is skipped and logged rather
+   than added blind. These show up tagged **LLM suggested**.
 
 This runs *in addition to* the TMDB filter, not instead of it. Leaving the
 provider set to **Disabled** (the default) skips this step entirely.
@@ -191,9 +197,10 @@ Your key is stored in `config/settings.json` on your own server (mounted
 volume, git-ignored) — never committed, never sent anywhere except the
 provider you chose.
 
-**Cost note:** this makes one LLM call per franchise per scan cycle (not
-per candidate), so cost stays low even on a free tier with a short
-`CHECK_INTERVAL_HOURS`.
+**Cost note:** this makes exactly one LLM call per franchise per scan
+cycle (not per candidate, and not two calls for the annotate+gap-find
+steps — they're combined into a single request), so cost stays low even
+on a free tier with a short `CHECK_INTERVAL_HOURS`.
 
 ## If MDBList calls fail
 

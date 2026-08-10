@@ -442,69 +442,93 @@ def call_llm(prompt: str, settings: dict) -> str:
     return caller(prompt, settings)
 
 
-def _extract_json_array(text: str):
-    """LLMs sometimes wrap JSON in prose or code fences — pull out the array."""
-    start = text.find("[")
-    end = text.rfind("]")
+def _extract_json_object(text: str):
+    """LLMs sometimes wrap JSON in prose or code fences — pull out the object."""
+    start = text.find("{")
+    end = text.rfind("}")
     if start == -1 or end == -1 or end < start:
-        return []
+        return {}
     try:
         return json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         log.warning("Could not parse LLM JSON output")
-        return []
+        return {}
 
 
-def llm_suggest_missing_titles(franchise: dict, known_titles: list) -> list:
+def llm_gap_and_annotate(franchise: dict, filter_matched: list, known_titles: list) -> dict:
     """
-    Asks the LLM what's missing from the current list. Returns a list of
-    {title, year, media_type, reasoning} dicts — unresolved, i.e. not yet
-    matched to a TMDB ID.
+    Single combined LLM call per franchise per scan cycle that does two
+    things at once (to keep cost/quota usage low):
+
+    1. Annotates each title the TMDB filter just found with a one-sentence
+       justification for why it belongs in the franchise.
+    2. Suggests any other titles that are missing from the list entirely.
+
+    Returns {"annotations": {title: reasoning}, "missing": [{title, year,
+    media_type, reasoning}, ...]}. Raises requests.RequestException or
+    ValueError on failure — callers should catch and use
+    _friendly_llm_error() to report it.
     """
     settings = load_llm_settings()
     if settings.get("provider", "none") == "none":
-        return []
+        return {"annotations": {}, "missing": []}
 
     hint = franchise.get("llm_hint", "")
-    titles_block = "\n".join(f"- {t}" for t in sorted(known_titles)) or "(list is currently empty)"
+    known_block = "\n".join(f"- {t}" for t in sorted(known_titles)) or "(list is currently empty)"
+
+    if filter_matched:
+        candidates_block = "\n".join(
+            f"- {i['title']} ({i['year']})" for i in filter_matched
+        )
+    else:
+        candidates_block = "(none this cycle)"
 
     prompt = f"""You are helping curate a Plex collection for the franchise "{franchise['name']}".
 
-Here is what's already in the collection:
-{titles_block}
+Already in the collection:
+{known_block}
+
+An automated studio/keyword filter just found these candidates to add this
+cycle, and each needs a one-sentence justification for why it genuinely
+belongs in "{franchise['name']}" (note briefly if you think one is actually
+NOT a good match instead):
+{candidates_block}
 
 {hint}
 
-List any movies or TV shows that are legitimately part of this franchise but
-are MISSING from the list above, including recent or upcoming releases you
-are aware of. Do not repeat anything already in the list. Be conservative —
-only include titles you are confident genuinely belong in this franchise,
+Separately, list any OTHER movies or TV shows that are legitimately part of
+this franchise but are missing from both the list above and the candidates
+above, including recent or upcoming releases you are aware of. Be
+conservative — only include titles you are confident genuinely belong,
 not loosely related or unofficial content.
 
-Respond with ONLY a JSON array (no prose, no markdown fences), where each
-element is:
-{{"title": "...", "year": "YYYY", "media_type": "movie" or "tv", "reasoning": "one short sentence"}}
+Respond with ONLY a JSON object (no prose, no markdown fences) of this
+exact shape:
+{{
+  "annotations": [{{"title": "...", "reasoning": "one short sentence"}}],
+  "missing": [{{"title": "...", "year": "YYYY", "media_type": "movie" or "tv", "reasoning": "one short sentence"}}]
+}}
 
-If nothing is missing, respond with an empty array: []
+Include exactly one annotation per candidate listed above, in the same
+order, even if the list is empty. If nothing is missing, use an empty
+array for "missing".
 """
 
-    try:
-        raw = call_llm(prompt, settings)
-    except (requests.RequestException, ValueError) as exc:
-        log.warning(
-            "[%s] LLM call failed: %s",
-            franchise["id"],
-            _friendly_llm_error(exc, settings.get("provider", "")),
-        )
-        return []
+    raw = call_llm(prompt, settings)
+    parsed = _extract_json_object(raw)
 
-    suggestions = _extract_json_array(raw)
-    # Basic shape validation
-    return [
+    annotations = {}
+    for a_item in parsed.get("annotations", []) if isinstance(parsed, dict) else []:
+        if isinstance(a_item, dict) and a_item.get("title"):
+            annotations[a_item["title"].strip().lower()] = a_item.get("reasoning", "")
+
+    missing = [
         s
-        for s in suggestions
+        for s in (parsed.get("missing", []) if isinstance(parsed, dict) else [])
         if isinstance(s, dict) and s.get("title") and s.get("media_type") in ("movie", "tv")
     ]
+
+    return {"annotations": annotations, "missing": missing}
 
 
 def resolve_tmdb_id(title: str, year: str, media_type: str, tmdb_api_key: str):
@@ -613,29 +637,31 @@ def notify(message: str, notify_url: str) -> None:
 
 
 def scan_franchise(franchise: dict, core: dict) -> dict:
-    """Returns {'new_count': int, 'error': str|None} for this franchise."""
+    """Returns {'new_count': int, 'error': str|None, 'warnings': [str, ...]} for this franchise."""
     fid = franchise["id"]
     fname = franchise["name"]
     tmdb_api_key = core["tmdb_api_key"]
     mdblist_api_key = core["mdblist_api_key"]
+    warnings = []
     log.info("Scanning %s...", fname)
 
     try:
         current = get_current_mdblist_tmdb_ids(franchise["mdblist_list_id"], mdblist_api_key)
     except requests.RequestException as exc:
         log.error("[%s] Could not fetch current MDBList items: %s", fid, exc)
-        return {"new_count": 0, "error": f"MDBList error for {fname}: {exc}"}
+        return {"new_count": 0, "error": f"MDBList error for {fname}: {exc}", "warnings": warnings}
 
     try:
         candidates = discover_candidates(franchise, tmdb_api_key)
     except requests.RequestException as exc:
         log.error("[%s] Could not query TMDB: %s", fid, exc)
-        return {"new_count": 0, "error": f"TMDB error for {fname}: {exc}"}
+        return {"new_count": 0, "error": f"TMDB error for {fname}: {exc}", "warnings": warnings}
 
     pending = load_pending(fid)
     rejected = load_rejected(fid)
 
     new_finds = []
+    filter_matched = []
     for item in candidates:
         key = f"{item['media_type']}:{item['tmdb_id']}"
         if (item["media_type"], item["tmdb_id"]) in current:
@@ -646,8 +672,9 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
         item["reasoning"] = ""
         pending[key] = item
         new_finds.append(item)
+        filter_matched.append(item)
 
-    # --- LLM gap-finding pass ---------------------------------------------
+    # --- LLM pass: annotate filter matches + find gaps ---------------------
     if load_llm_settings().get("provider", "none") != "none":
         # Build a plain-title view of what the LLM should treat as "already have":
         # current list contents + everything already sitting in the pending queue
@@ -656,29 +683,44 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
         known_titles |= {i["title"] for i in pending.values()}
         known_titles |= {i["title"] for i in rejected.values()}
 
-        suggestions = llm_suggest_missing_titles(franchise, sorted(known_titles))
-        for s in suggestions:
-            tmdb_id = resolve_tmdb_id(s["title"], s.get("year", ""), s["media_type"], tmdb_api_key)
-            if not tmdb_id:
-                log.info(
-                    "[%s] LLM suggested %r but no TMDB match found — skipping",
-                    fid,
-                    s["title"],
-                )
-                continue
-            key = f"{s['media_type']}:{tmdb_id}"
-            if (s["media_type"], tmdb_id) in current or key in pending or key in rejected:
-                continue
-            item = {
-                "tmdb_id": tmdb_id,
-                "media_type": s["media_type"],
-                "title": s["title"],
-                "year": s.get("year", ""),
-                "source": "llm",
-                "reasoning": s.get("reasoning", ""),
-            }
-            pending[key] = item
-            new_finds.append(item)
+        settings_for_error = load_llm_settings()
+        try:
+            result = llm_gap_and_annotate(franchise, filter_matched, sorted(known_titles))
+        except (requests.RequestException, ValueError) as exc:
+            msg = _friendly_llm_error(exc, settings_for_error.get("provider", ""))
+            log.warning("[%s] LLM call failed: %s", fid, msg)
+            warnings.append(f"{fname}: {msg}")
+        else:
+            # Apply reasoning to the items the filter already found.
+            for item in filter_matched:
+                reasoning = result["annotations"].get(item["title"].strip().lower())
+                if reasoning:
+                    item["reasoning"] = reasoning
+                    pending[f"{item['media_type']}:{item['tmdb_id']}"]["reasoning"] = reasoning
+
+            # Add anything the LLM flagged as missing entirely.
+            for s in result["missing"]:
+                tmdb_id = resolve_tmdb_id(s["title"], s.get("year", ""), s["media_type"], tmdb_api_key)
+                if not tmdb_id:
+                    log.info(
+                        "[%s] LLM suggested %r but no TMDB match found — skipping",
+                        fid,
+                        s["title"],
+                    )
+                    continue
+                key = f"{s['media_type']}:{tmdb_id}"
+                if (s["media_type"], tmdb_id) in current or key in pending or key in rejected:
+                    continue
+                item = {
+                    "tmdb_id": tmdb_id,
+                    "media_type": s["media_type"],
+                    "title": s["title"],
+                    "year": s.get("year", ""),
+                    "source": "llm",
+                    "reasoning": s.get("reasoning", ""),
+                }
+                pending[key] = item
+                new_finds.append(item)
 
     if new_finds:
         save_pending(fid, pending)
@@ -691,13 +733,14 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
     else:
         log.info("[%s] No new candidates found.", fid)
 
-    return {"new_count": len(new_finds), "error": None}
+    return {"new_count": len(new_finds), "error": None, "warnings": warnings}
 
 
 def run_scan() -> dict:
     """
     Runs one scan cycle across all franchises and returns a summary:
-    {'skipped': bool, 'franchise_count': int, 'total_new': int, 'errors': [str, ...]}
+    {'skipped': bool, 'franchise_count': int, 'total_new': int,
+     'errors': [str, ...], 'warnings': [str, ...]}
     """
     with _lock:
         core = load_core_settings()
@@ -706,22 +749,27 @@ def run_scan() -> dict:
                 "Skipping scan — TMDB and/or MDBList API key not configured yet. "
                 "Set them on the Settings page."
             )
-            return {"skipped": True, "franchise_count": 0, "total_new": 0, "errors": []}
+            return {"skipped": True, "franchise_count": 0, "total_new": 0, "errors": [], "warnings": []}
 
         franchises = load_franchises()
         total_new = 0
         errors = []
+        warnings = []
         for franchise in franchises:
             result = scan_franchise(franchise, core)
             total_new += result["new_count"]
             if result["error"]:
                 errors.append(result["error"])
+            for w in result["warnings"]:
+                if w not in warnings:  # de-dupe identical rate-limit messages across franchises
+                    warnings.append(w)
 
         return {
             "skipped": False,
             "franchise_count": len(franchises),
             "total_new": total_new,
             "errors": errors,
+            "warnings": warnings,
         }
 
 
@@ -762,6 +810,7 @@ def index():
         scan_result=request.args.get("scan_result"),
         scan_found=request.args.get("scan_found"),
         scan_errors=request.args.get("scan_errors"),
+        scan_warnings=request.args.get("scan_warnings"),
     )
 
 
@@ -806,6 +855,7 @@ def scan_now():
             scan_result="error" if result["errors"] else "done",
             scan_found=result["total_new"],
             scan_errors=" | ".join(result["errors"]) if result["errors"] else None,
+            scan_warnings=" | ".join(result["warnings"]) if result["warnings"] else None,
         )
     )
 
@@ -928,14 +978,24 @@ def settings_core_save():
 
 def _friendly_llm_error(exc: Exception, provider: str) -> str:
     """
-    Adds an actionable hint for the most common failure mode: a model ID
-    that's been renamed or retired. LLM providers (Gemini especially)
-    change their current model lineup often enough that a hardcoded
-    default can go stale between app releases.
+    Adds an actionable hint for the most common failure modes: a model ID
+    that's been renamed/retired (404), or a rate limit / quota cap being
+    hit (429) — the latter is expected behavior on free tiers, not a bug.
     """
     text = str(exc)
-    is_404 = isinstance(exc, requests.HTTPError) and getattr(exc.response, "status_code", None) == 404
-    is_404 = is_404 or "404" in text
+    label = LLM_PROVIDERS.get(provider, {}).get("label", provider or "LLM provider")
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+
+    is_429 = status_code == 429 or "429" in text or "rate limit" in text.lower() or "quota" in text.lower()
+    if is_429:
+        return (
+            f"{label} rate limit or quota reached. This is expected on free "
+            f"tiers if you scan often or track many franchises — the LLM "
+            f"gap-finding pass was skipped this cycle and will retry next "
+            f"scan automatically."
+        )
+
+    is_404 = status_code == 404 or "404" in text
     if not is_404:
         return f"Connection failed: {text}"
 
