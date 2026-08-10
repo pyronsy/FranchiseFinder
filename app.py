@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 import requests
-from flask import Flask, abort, redirect, render_template, request, url_for
+from flask import Flask, abort, jsonify, redirect, render_template, request, url_for
 
 # --------------------------------------------------------------------------
 # Config
@@ -561,9 +561,58 @@ def resolve_tmdb_id(title: str, year: str, media_type: str, tmdb_api_key: str):
     return str(results[0]["id"])
 
 
+def get_imdb_id(media_type: str, tmdb_id: str, tmdb_api_key: str) -> str:
+    """
+    Looks up the IMDb ID for a TMDB title, for linking out to IMDb from the
+    approval queue. Called once per newly-found candidate (not for every
+    result in a bulk discover scan) to keep TMDB API usage proportional to
+    what's actually new, not to the full catalog being filtered.
+    """
+    try:
+        resp = requests.get(
+            f"{TMDB_BASE}/{media_type}/{tmdb_id}/external_ids",
+            params={"api_key": tmdb_api_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("imdb_id") or ""
+    except requests.RequestException as exc:
+        log.debug("Could not fetch IMDb ID for %s:%s: %s", media_type, tmdb_id, exc)
+        return ""
+
+
 # --------------------------------------------------------------------------
 # MDBList
 # --------------------------------------------------------------------------
+
+
+def get_my_mdblist_lists(mdblist_api_key: str) -> list:
+    """
+    Fetches the authenticated user's own MDBList lists via the confirmed
+    `/lists/user` endpoint, returning each list's real numeric ID — this
+    is the value MDBList's API actually requires, which is easy to
+    confuse with the username/slug shown in a list's browser URL
+    (e.g. mdblist.com/lists/username/list-slug/).
+    """
+    resp = requests.get(
+        f"{MDBLIST_BASE}/lists/user",
+        params={"apikey": mdblist_api_key},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not isinstance(data, list):
+        return []
+    return [
+        {
+            "id": item.get("id"),
+            "name": item.get("name", ""),
+            "mediatype": item.get("mediatype", ""),
+            "items": item.get("items", 0),
+        }
+        for item in data
+        if item.get("id") is not None
+    ]
 
 
 def get_current_mdblist_tmdb_ids(list_id: str, mdblist_api_key: str):
@@ -790,6 +839,7 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
         item["source"] = "filter"
         item["reasoning"] = ""
         item["llm_reasoning"] = False
+        item["imdb_id"] = get_imdb_id(item["media_type"], item["tmdb_id"], tmdb_api_key)
         pending[key] = item
         new_finds.append(item)
         filter_matched.append(item)
@@ -850,6 +900,7 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
                     "source": "llm",
                     "reasoning": s.get("reasoning") or "Suggested by the LLM gap-finding pass.",
                     "llm_reasoning": True,
+                    "imdb_id": get_imdb_id(s["media_type"], tmdb_id, tmdb_api_key),
                 }
                 pending[key] = item
                 new_finds.append(item)
@@ -994,6 +1045,58 @@ def reject(franchise_id: str, media_type: str, tmdb_id: str):
         save_rejected(franchise_id, rejected)
         save_pending(franchise_id, pending)
     return redirect(url_for("index"))
+
+
+@app.get("/rejected")
+def rejected_page():
+    franchises = load_franchises()
+    groups = []
+    total = 0
+    for f in franchises:
+        rejected = load_rejected(f["id"])
+        items = sorted(rejected.values(), key=lambda i: (i["year"] or "", i["title"]))
+        total += len(items)
+        groups.append({"id": f["id"], "name": f["name"], "rejected_items": items})
+    return render_template("rejected.html", groups=groups, total=total)
+
+
+@app.post("/rejected/recheck/<franchise_id>/<media_type>/<tmdb_id>")
+def rejected_recheck(franchise_id: str, media_type: str, tmdb_id: str):
+    """Moves one item back from rejected into the pending approval queue."""
+    key = f"{media_type}:{tmdb_id}"
+    rejected = load_rejected(franchise_id)
+    item = rejected.pop(key, None)
+    if item:
+        pending = load_pending(franchise_id)
+        pending[key] = item
+        save_pending(franchise_id, pending)
+        save_rejected(franchise_id, rejected)
+    return redirect(url_for("rejected_page"))
+
+
+@app.post("/rejected/recheck-all/<franchise_id>")
+def rejected_recheck_all(franchise_id: str):
+    """Moves every rejected item for one franchise back into the pending queue at once —
+    handy after updating a franchise's filter or LLM hint, when old rejections may no
+    longer reflect the current criteria."""
+    rejected = load_rejected(franchise_id)
+    if rejected:
+        pending = load_pending(franchise_id)
+        pending.update(rejected)
+        save_pending(franchise_id, pending)
+        save_rejected(franchise_id, {})
+    return redirect(url_for("rejected_page"))
+
+
+@app.post("/rejected/delete/<franchise_id>/<media_type>/<tmdb_id>")
+def rejected_delete(franchise_id: str, media_type: str, tmdb_id: str):
+    """Permanently removes one item from the rejected list (not moved anywhere)."""
+    key = f"{media_type}:{tmdb_id}"
+    rejected = load_rejected(franchise_id)
+    if key in rejected:
+        del rejected[key]
+        save_rejected(franchise_id, rejected)
+    return redirect(url_for("rejected_page"))
 
 
 @app.post("/scan-now")
@@ -1266,6 +1369,23 @@ def _parse_franchise_form(form, existing_ids: set, editing_id: str = None) -> di
         "exclude_tmdb_ids": exclude_ids,
         "llm_hint": llm_hint,
     }
+
+
+@app.get("/franchises/mdblist-lists")
+def franchises_mdblist_lists():
+    """
+    JSON endpoint the Manage Franchises page calls to populate a picker of
+    the user's actual MDBList lists (with real numeric IDs) instead of
+    requiring them to copy a list ID from a URL — see get_my_mdblist_lists().
+    """
+    mdblist_api_key = load_core_settings()["mdblist_api_key"]
+    if not mdblist_api_key:
+        return jsonify({"lists": [], "error": "No MDBList API key set on the Settings page."})
+    try:
+        lists = get_my_mdblist_lists(mdblist_api_key)
+    except requests.RequestException as exc:
+        return jsonify({"lists": [], "error": f"Could not reach MDBList: {exc}"})
+    return jsonify({"lists": lists, "error": None})
 
 
 @app.get("/franchises")

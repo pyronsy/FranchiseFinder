@@ -39,6 +39,7 @@
 <body>
   <nav>
     <a href="{{ url_for('index') }}">Approvals</a>
+    <a href="{{ url_for('rejected_page') }}">Rejected</a>
     <a class="active" href="{{ url_for('franchises_page') }}">Manage Franchises</a>
     <a href="{{ url_for('settings_page') }}">Settings</a>
   </nav>
@@ -88,10 +89,77 @@
 
     <label>
       MDBList list ID
-      <input type="text" name="mdblist_list_id" required placeholder="e.g. 123456"
+      <select id="mdblist-list-picker" style="margin-bottom: 6px;">
+        <option value="">Loading your MDBList lists…</option>
+      </select>
+      <input type="text" name="mdblist_list_id" id="mdblist-list-id-input" required placeholder="e.g. 123456"
              value="{{ editing.mdblist_list_id if editing else '' }}">
-      <div class="hint-text">Approved items for this franchise are pushed to this MDBList list.</div>
+      <div class="hint-text" id="mdblist-picker-hint">
+        Approved items for this franchise are pushed to this MDBList list. Pick from the
+        dropdown above (recommended) or paste the numeric ID directly — not the
+        username/slug from the list's browser URL.
+      </div>
     </label>
+
+    <script>
+      (function () {
+        const picker = document.getElementById('mdblist-list-picker');
+        const input = document.getElementById('mdblist-list-id-input');
+        const hint = document.getElementById('mdblist-picker-hint');
+        const currentValue = input.value;
+
+        fetch('{{ url_for("franchises_mdblist_lists") }}')
+          .then(r => r.json())
+          .then(data => {
+            picker.innerHTML = '';
+
+            if (data.error) {
+              picker.innerHTML = '<option value="">Picker unavailable — enter ID manually below</option>';
+              picker.disabled = true;
+              hint.textContent = data.error + ' You can still type the numeric list ID directly below.';
+              return;
+            }
+            if (!data.lists || data.lists.length === 0) {
+              picker.innerHTML = '<option value="">No lists found — create one on mdblist.com first</option>';
+              picker.disabled = true;
+              return;
+            }
+
+            const placeholder = document.createElement('option');
+            placeholder.value = '';
+            placeholder.textContent = '— pick a list —';
+            picker.appendChild(placeholder);
+
+            let matched = false;
+            data.lists.forEach(list => {
+              const opt = document.createElement('option');
+              opt.value = list.id;
+              opt.textContent = `${list.name} (${list.mediatype || 'mixed'}, ${list.items} items) — #${list.id}`;
+              if (String(list.id) === String(currentValue)) {
+                opt.selected = true;
+                matched = true;
+              }
+              picker.appendChild(opt);
+            });
+
+            if (!matched && currentValue) {
+              const custom = document.createElement('option');
+              custom.value = currentValue;
+              custom.textContent = `Current value: ${currentValue} (not in your list — check this is correct)`;
+              custom.selected = true;
+              picker.appendChild(custom);
+            }
+
+            picker.addEventListener('change', () => {
+              if (picker.value) input.value = picker.value;
+            });
+          })
+          .catch(() => {
+            picker.innerHTML = '<option value="">Picker unavailable — enter ID manually below</option>';
+            picker.disabled = true;
+          });
+      })();
+    </script>
 
     <div class="row">
       <div>

@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FranchiseFinder — Rejected</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; background: #111; color: #eee; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.1rem; margin-top: 32px; border-bottom: 1px solid #333; padding-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+    .item { display: flex; justify-content: space-between; align-items: center; padding: 12px; border: 1px solid #333; border-radius: 8px; margin-bottom: 10px; }
+    .meta { display: flex; flex-direction: column; }
+    .title { font-weight: 600; }
+    .sub { color: #999; font-size: 0.85rem; }
+    .ext-link { color: #7aa2f7; text-decoration: none; }
+    .ext-link:hover { text-decoration: underline; }
+    .reasoning { color: #7aa2f7; font-size: 0.85rem; margin-top: 2px; font-style: italic; }
+    .reasoning-default { color: #888; font-style: normal; }
+    .badge { display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; margin-left: 6px; vertical-align: middle; }
+    .badge-llm { background: #3b2f6b; color: #cbb9ff; }
+    .badge-filter { background: #2a2a2a; color: #999; }
+    form { display: inline; }
+    button { padding: 6px 12px; border: none; border-radius: 6px; cursor: pointer; margin-left: 6px; font-size: 0.85rem; }
+    .recheck { background: #2e7d32; color: white; }
+    .recheck-all { background: #1f2f4a; color: #b7cde6; font-size: 0.8rem; }
+    .delete { background: #6d1f1f; color: white; }
+    .empty { color: #888; }
+    nav { margin-bottom: 20px; }
+    nav a { color: #7aa2f7; text-decoration: none; margin-right: 16px; font-size: 0.9rem; }
+    nav a.active { color: #eee; font-weight: 600; }
+    p.intro { color: #999; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('index') }}">Approvals</a>
+    <a class="active" href="{{ url_for('rejected_page') }}">Rejected</a>
+    <a href="{{ url_for('franchises_page') }}">Manage Franchises</a>
+    <a href="{{ url_for('settings_page') }}">Settings</a>
+  </nav>
+
+  <h1>FranchiseFinder — {{ total }} rejected item{{ 's' if total != 1 else '' }}</h1>
+  <p class="intro">
+    Titles you've rejected stay here permanently so scans don't keep
+    re-suggesting them. If you've since changed a franchise's filter or LLM
+    hint, use <strong>Recheck</strong> to send an item back to the
+    Approvals queue for a fresh decision — this doesn't re-run the LLM,
+    it just un-rejects it so you can judge it again yourself.
+  </p>
+
+  {% if not groups %}
+    <p class="empty">No franchises configured yet. <a href="{{ url_for('franchises_page') }}">Add one</a> to get started.</p>
+  {% endif %}
+
+  {% for group in groups %}
+    <h2>
+      <span>{{ group.name }} {% if group.rejected_items %}({{ group.rejected_items|length }}){% endif %}</span>
+      {% if group.rejected_items %}
+        <form method="post" action="{{ url_for('rejected_recheck_all', franchise_id=group.id) }}"
+              onsubmit="return confirm('Send all {{ group.rejected_items|length }} rejected item(s) for {{ group.name }} back to Approvals?');">
+          <button class="recheck-all" type="submit">Recheck all</button>
+        </form>
+      {% endif %}
+    </h2>
+    {% if group.rejected_items %}
+      {% for item in group.rejected_items %}
+        <div class="item">
+          <div class="meta">
+            <span class="title">
+              {{ item.title }} ({{ item.year }})
+              {% if item.source == 'llm' %}
+                <span class="badge badge-llm">was LLM suggested</span>
+              {% elif item.llm_reasoning %}
+                <span class="badge badge-filter">was filter match</span>
+                <span class="badge badge-llm">+ LLM reasoning</span>
+              {% else %}
+                <span class="badge badge-filter">was filter match</span>
+              {% endif %}
+            </span>
+            <span class="sub">
+              {{ 'Movie' if item.media_type == 'movie' else 'TV Show' }} · TMDB {{ item.tmdb_id }}
+              · <a class="ext-link" href="https://www.themoviedb.org/{{ 'movie' if item.media_type == 'movie' else 'tv' }}/{{ item.tmdb_id }}" target="_blank" rel="noopener">TMDB ↗</a>
+              {% if item.imdb_id %}
+                · <a class="ext-link" href="https://www.imdb.com/title/{{ item.imdb_id }}/" target="_blank" rel="noopener">IMDb ↗</a>
+              {% endif %}
+            </span>
+            {% if item.reasoning %}
+              {% if item.llm_reasoning or item.source == 'llm' %}
+                <span class="reasoning">"{{ item.reasoning }}"</span>
+              {% else %}
+                <span class="reasoning reasoning-default">{{ item.reasoning }}</span>
+              {% endif %}
+            {% endif %}
+          </div>
+          <div>
+            <form method="post" action="{{ url_for('rejected_recheck', franchise_id=group.id, media_type=item.media_type, tmdb_id=item.tmdb_id) }}">
+              <button class="recheck" type="submit">Recheck</button>
+            </form>
+            <form method="post" action="{{ url_for('rejected_delete', franchise_id=group.id, media_type=item.media_type, tmdb_id=item.tmdb_id) }}"
+                  onsubmit="return confirm('Permanently remove {{ item.title }} from the rejected list?');">
+              <button class="delete" type="submit">Delete</button>
+            </form>
+          </div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <p class="empty">Nothing rejected for this franchise.</p>
+    {% endif %}
+  {% endfor %}
+</body>
+</html>

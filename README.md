@@ -70,6 +70,35 @@ before you rely on it. Keys are stored in `config/settings.json` on your
 own server (git-ignored, never sent anywhere except the provider you
 configured) and shown masked when you revisit the page.
 
+## Rejected items
+
+Rejecting a title on the Approvals page keeps it out of future scans
+permanently — it won't get re-suggested even after the franchise's next
+several scans. The **Rejected** page lists everything you've turned down,
+grouped by franchise, and lets you:
+
+- **Recheck** one item — sends it back to the Approvals queue for a fresh
+  decision (this doesn't re-run the LLM or the TMDB filter, it just
+  un-rejects it so it shows up for you to judge again).
+- **Recheck all** for a franchise — useful right after you've changed that
+  franchise's `tmdb_filter` or `llm_hint`, when old rejections may no
+  longer reflect your current criteria and are worth a second look under
+  the new settings.
+- **Delete** — permanently forgets an item instead of rechecking it, if
+  you're sure you never want to see it again and just want it off this
+  list.
+
+## Investigating an item before you decide
+
+Every item on the Approvals and Rejected pages links out to its **TMDB**
+page, and its **IMDb** page too when available — useful for checking cast,
+plot, or release details before approving or rejecting something you're
+not sure about. The IMDb ID is looked up once when an item is first
+found (not during the bulk TMDB discover scan, to keep API usage
+proportional to what's actually new), so items added before this feature
+existed will show a TMDB link only until they're rechecked or a franchise
+rescans them.
+
 ## Getting API keys
 
 - **TMDB**: https://www.themoviedb.org/settings/api (free, no card)
@@ -97,7 +126,13 @@ Each entry in `config/franchises.json` looks like:
 
 - **id** — short, unique, used internally for file storage (lowercase, no spaces).
 - **name** — display name shown in the UI.
-- **mdblist_list_id** — the MDBList list this franchise's approved items get added to.
+- **mdblist_list_id** — the MDBList list this franchise's approved items
+  get added to. This must be the list's **numeric ID**, not the
+  username/slug shown in its browser URL (e.g. `mdblist.com/lists/pyronsy/mcu-xyz123/`
+  has slug `mcu-xyz123`, which is *not* the same as the numeric ID the API
+  needs). The **Manage Franchises** page has a dropdown that fetches your
+  actual lists from MDBList and fills in the correct numeric ID for
+  you — use that instead of typing this by hand.
 - **tmdb_filter** — how TMDB is queried. `type` is one of:
   - `"company"` — matches a production company/studio ID (e.g. Marvel
     Studios = 420). Best when a franchise is made almost entirely by one
@@ -211,6 +246,16 @@ on a free tier with a short `CHECK_INTERVAL_HOURS`.
 
 ## If MDBList calls fail
 
+**Wrong list ID is the most common cause.** MDBList's API requires the
+list's **numeric ID**, not the username/slug from its browser URL. Use the
+dropdown on the **Manage Franchises** page (fetches your real lists
+directly from MDBList) rather than typing this by hand — see the
+`mdblist_list_id` note above. A malformed ID here can surface as either an
+HTTP error *or*, in some cases, as what looks like a connection failure
+("no endpoint variant even got a response") if the resulting URL doesn't
+route the way the app expects — so if you see that error, check this
+first before assuming it's a network problem.
+
 **Reading** a list (`get_current_mdblist_tmdb_ids()`) uses MDBList's
 confirmed `GET /lists/{id}/items` endpoint and response shape — this part
 is stable and shouldn't need adjustment.
@@ -260,6 +305,7 @@ this locally, see Quick Start above.
 ```
 app.py                          # scan loop + Flask web UI
 templates/index.html            # approval queue page
+templates/rejected.html         # rejected items — recheck or delete permanently
 templates/franchises.html       # add/edit/delete franchises
 templates/settings.html         # TMDB/MDBList keys + LLM provider settings
 config/franchises.example.json  # reference template for franchises.json (or just use the UI)

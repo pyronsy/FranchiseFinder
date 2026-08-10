@@ -11,6 +11,8 @@
     .meta { display: flex; flex-direction: column; }
     .title { font-weight: 600; }
     .sub { color: #999; font-size: 0.85rem; }
+    .ext-link { color: #7aa2f7; text-decoration: none; }
+    .ext-link:hover { text-decoration: underline; }
     .reasoning { color: #7aa2f7; font-size: 0.85rem; margin-top: 2px; font-style: italic; }
     .reasoning-default { color: #888; font-style: normal; }
     .badge { display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; margin-left: 6px; vertical-align: middle; }
@@ -35,6 +37,7 @@
 <body>
   <nav>
     <a class="active" href="{{ url_for('index') }}">Approvals</a>
+    <a href="{{ url_for('rejected_page') }}">Rejected</a>
     <a href="{{ url_for('franchises_page') }}">Manage Franchises</a>
     <a href="{{ url_for('settings_page') }}">Settings</a>
   </nav>
@@ -94,7 +97,13 @@
                 <span class="badge badge-filter">filter match</span>
               {% endif %}
             </span>
-            <span class="sub">{{ 'Movie' if item.media_type == 'movie' else 'TV Show' }} · TMDB {{ item.tmdb_id }}</span>
+            <span class="sub">
+              {{ 'Movie' if item.media_type == 'movie' else 'TV Show' }} · TMDB {{ item.tmdb_id }}
+              · <a class="ext-link" href="https://www.themoviedb.org/{{ 'movie' if item.media_type == 'movie' else 'tv' }}/{{ item.tmdb_id }}" target="_blank" rel="noopener">TMDB ↗</a>
+              {% if item.imdb_id %}
+                · <a class="ext-link" href="https://www.imdb.com/title/{{ item.imdb_id }}/" target="_blank" rel="noopener">IMDb ↗</a>
+              {% endif %}
+            </span>
             {% if item.reasoning %}
               {% if item.llm_reasoning or item.source == 'llm' %}
                 <span class="reasoning">"{{ item.reasoning }}"</span>
