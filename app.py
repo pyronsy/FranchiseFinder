@@ -895,9 +895,49 @@ WIKIPEDIA_FRANCHISE_LIST_TITLE = "Lists_of_multimedia_franchises"
 WIKIPEDIA_USER_AGENT = "FranchiseFinder/1.0 (https://github.com/pyronsy/FranchiseFinder; self-hosted Plex collection curator)"
 WIKIPEDIA_CATALOG_FILE_NAME = "wikipedia_franchise_catalog.json"
 
-_WIKI_SECTION_RE = re.compile(r"^==\s*(.+?)\s*==\s*$")
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:\|([^\]]+))?\]\]")
 _WIKI_IGNORED_PREFIXES = {"File", "Category", "Special", "Help", "Wikipedia", "Template", "Portal"}
+_WIKI_NON_FRANCHISE_HEADINGS = {"see also", "references", "notes", "external links", "footnotes", "citations"}
+
+# Wikipedia formats a "pseudo-heading" a few different ways depending on the
+# article — proper == headings ==, a definition-list ;Term, or a bolded
+# '''Term''' standing alone on its own line. Rather than assume one, this
+# tries each in order per line, since guessing wrong at the real format is
+# exactly what caused the "nothing loaded" bug in an earlier version — it
+# silently matched zero lines and every link got discarded.
+_WIKI_HEADING_PATTERNS = [
+    re.compile(r"^(=+)\s*(.+?)\s*\1$"),  # == Heading ==, === Heading ===, etc.
+    re.compile(r"^;\s*(.+)$"),  # ;Heading  (definition list term)
+    re.compile(r"^'''(.+?)'''$"),  # '''Heading''' alone on its own line
+]
+
+
+def _extract_wiki_heading(line: str):
+    line = line.strip()
+    if not line:
+        return None
+    for pattern in _WIKI_HEADING_PATTERNS:
+        m = pattern.match(line)
+        if m:
+            return m.groups()[-1].strip()
+    return None
+
+
+def _extract_wiki_links(text: str, exclude_prefixes: set) -> list:
+    """Returns [(name, wiki_url)] for every [[link]] in text, deduped by URL."""
+    results = []
+    for target, display in _WIKI_LINK_RE.findall(text):
+        target = target.strip()
+        if not target:
+            continue
+        if target.split(":")[0] in exclude_prefixes:
+            continue
+        name = (display or target).strip()
+        if not name:
+            continue
+        wiki_url = "https://en.wikipedia.org/wiki/" + target.replace(" ", "_")
+        results.append((name, wiki_url))
+    return results
 
 
 def load_wikipedia_catalog_cache() -> dict:
@@ -909,14 +949,103 @@ def save_wikipedia_catalog_cache(data: dict) -> None:
     _save(DATA_DIR / WIKIPEDIA_CATALOG_FILE_NAME, data)
 
 
+def _parse_franchise_catalog_wikitext(wikitext: str) -> list:
+    """
+    Primary parse: walk the wikitext tracking the current pseudo-heading
+    (via _extract_wiki_heading, which tries several real-world formats),
+    and collect links only while inside a heading whose text starts with
+    "franchises originating in" — this is what gives each entry a proper
+    category grouping.
+
+    Falls back to a permissive whole-document link scan if that yields
+    nothing (e.g. the article's structure doesn't match any of the
+    patterns this function knows about) — better to surface an unsorted
+    but usable list than to silently show nothing, which is what happened
+    before this fallback existed.
+    """
+    franchises = []
+    seen_urls = set()
+    current_section = ""
+
+    for line in wikitext.splitlines():
+        heading = _extract_wiki_heading(line)
+        if heading is not None:
+            current_section = heading
+            continue
+        if not current_section.lower().startswith("franchises originating in"):
+            continue
+        for name, wiki_url in _extract_wiki_links(line, _WIKI_IGNORED_PREFIXES):
+            key = wiki_url.lower()
+            if key in seen_urls:
+                continue
+            seen_urls.add(key)
+            franchises.append({"category": current_section, "name": name, "wiki_url": wiki_url})
+
+    if franchises:
+        return franchises
+
+    # Fallback: no recognized "franchises originating in ..." sections were
+    # found at all. Collect every link on the page instead, skipping only
+    # the lead section (before the first heading of any kind — this is
+    # where generic intro links like "media franchise" or "books" live)
+    # and known non-franchise trailing sections (See also, References...).
+    log.warning(
+        "Wikipedia franchise catalog: no 'Franchises originating in...' "
+        "sections matched any known heading format — falling back to a "
+        "flat, uncategorized link scan of the whole article."
+    )
+    current_section = None  # None = still in the lead, before any heading
+    for line in wikitext.splitlines():
+        heading = _extract_wiki_heading(line)
+        if heading is not None:
+            current_section = heading
+            continue
+        if current_section is None:
+            continue
+        if current_section.strip().lower() in _WIKI_NON_FRANCHISE_HEADINGS:
+            continue
+        for name, wiki_url in _extract_wiki_links(line, _WIKI_IGNORED_PREFIXES):
+            key = wiki_url.lower()
+            if key in seen_urls:
+                continue
+            seen_urls.add(key)
+            franchises.append({"category": "Franchises", "name": name, "wiki_url": wiki_url})
+
+    if franchises:
+        return franchises
+
+    # Last resort: not even one heading (of any recognized format) was found
+    # anywhere in the document, so the section-aware fallback above never
+    # left "lead section" mode and also came up empty. Rather than show
+    # nothing, grab every link in the whole document — this may include
+    # some noise (intro concept links, citations), but that's a far better
+    # failure mode than a blank catalog, and this tier should only ever
+    # trigger if the article's structure is genuinely unlike normal
+    # Wikipedia convention.
+    log.warning(
+        "Wikipedia franchise catalog: no headings of any recognized format "
+        "found at all — falling back to a flat scan of every link in the "
+        "document. Results may include some non-franchise noise."
+    )
+    for name, wiki_url in _extract_wiki_links(wikitext, _WIKI_IGNORED_PREFIXES):
+        key = wiki_url.lower()
+        if key in seen_urls:
+            continue
+        seen_urls.add(key)
+        franchises.append({"category": "Franchises", "name": name, "wiki_url": wiki_url})
+
+    return franchises
+
+
 def fetch_wikipedia_franchise_catalog_live() -> list:
     """
     Fetches https://en.wikipedia.org/wiki/Lists_of_multimedia_franchises via
     the MediaWiki API as raw wikitext (not rendered HTML — far more
     reliable to parse than scraping HTML tables, since Wikipedia's
-    [[link]] syntax and == heading == syntax are consistent even though
-    rendered table layouts across articles are not) and extracts the
-    categorized list of franchise names + links.
+    [[link]] syntax is consistent even though rendered table layouts
+    across articles are not) and extracts the categorized list of
+    franchise names + links. See _parse_franchise_catalog_wikitext() for
+    the actual parsing logic and its fallback behavior.
 
     This deliberately only extracts NAMES and links, not each franchise's
     actual movies/shows: most entries link to a franchise's general
@@ -956,35 +1085,7 @@ def fetch_wikipedia_franchise_catalog_live() -> list:
     if not wikitext:
         raise ValueError("Wikipedia API returned no page content — the article may have been renamed or removed.")
 
-    franchises = []
-    seen_urls = set()
-    current_section = ""
-
-    for line in wikitext.splitlines():
-        section_match = _WIKI_SECTION_RE.match(line.strip())
-        if section_match:
-            current_section = section_match.group(1).strip()
-            continue
-        if not current_section.lower().startswith("franchises originating in"):
-            continue
-        for target, display in _WIKI_LINK_RE.findall(line):
-            target = target.strip()
-            if not target:
-                continue
-            prefix = target.split(":")[0]
-            if prefix in _WIKI_IGNORED_PREFIXES:
-                continue
-            name = (display or target).strip()
-            if not name:
-                continue
-            wiki_url = "https://en.wikipedia.org/wiki/" + target.replace(" ", "_")
-            key = wiki_url.lower()
-            if key in seen_urls:
-                continue
-            seen_urls.add(key)
-            franchises.append({"category": current_section, "name": name, "wiki_url": wiki_url})
-
-    return franchises
+    return _parse_franchise_catalog_wikitext(wikitext)
 
 
 def get_wikipedia_franchise_catalog(force_refresh: bool = False) -> dict:

@@ -139,6 +139,19 @@ The catalog is cached locally (`data/wikipedia_franchise_catalog.json`)
 after the first load — **Refresh from Wikipedia** forces a re-fetch if
 Wikipedia's list has changed since.
 
+### If the catalog shows nothing
+
+The parser doesn't assume one fixed wikitext format for how Wikipedia
+marks up the category labels (`==Heading==`, `;Definition list term`, and
+`'''Bold paragraph'''` are all recognized) — if Wikipedia's editors
+restructure the page in a way that doesn't match any of those, the parser
+falls back to a flatter, less-categorized scan rather than showing
+nothing. If you ever see an empty catalog anyway, check the app logs: a
+warning there will say whether it fell back and why, which is the
+fastest way to tell "Wikipedia changed something" apart from "the app
+genuinely couldn't reach Wikipedia at all" (the latter shows a red error
+banner on the page itself instead).
+
 ## Plex Import
 
 Normal scans only look for *new* TMDB releases. **Plex Import** does the
