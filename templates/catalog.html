@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FranchiseFinder — Franchise Catalog</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; background: #111; color: #eee; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.05rem; margin-top: 28px; border-bottom: 1px solid #333; padding-bottom: 6px; }
+    p.intro { color: #999; font-size: 0.9rem; }
+    p.intro a { color: #7aa2f7; }
+    nav { margin-bottom: 20px; }
+    nav a { color: #7aa2f7; text-decoration: none; margin-right: 16px; font-size: 0.9rem; }
+    nav a.active { color: #eee; font-weight: 600; }
+
+    .banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9rem; }
+    .banner-success { background: #1f2f4a; border: 1px solid #2e4f7d; color: #b7cde6; }
+    .banner-error { background: #4a1f1f; border: 1px solid #6d1f1f; color: #f5b5b5; }
+
+    .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+    #search-box {
+      flex: 1; padding: 8px; background: #1a1a1a; border: 1px solid #333;
+      border-radius: 6px; color: #eee; font-family: inherit; font-size: 0.9rem;
+    }
+    .refresh-btn { background: #333; color: #ccc; padding: 8px 14px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; white-space: nowrap; }
+    .meta-line { color: #777; font-size: 0.75rem; margin: 6px 0 18px; }
+
+    .catalog-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border: 1px solid #333; border-radius: 8px; margin-bottom: 8px; }
+    .catalog-item.hidden { display: none; }
+    .item-name { font-weight: 600; }
+    .item-name a { color: inherit; text-decoration: none; }
+    .item-name a:hover { text-decoration: underline; }
+    .item-added-badge { display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; margin-left: 8px; background: #1f4a26; color: #b7e6bd; vertical-align: middle; }
+    .add-btn { background: #2e7d32; color: white; padding: 6px 12px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+    .add-btn:disabled { background: #333; color: #888; cursor: not-allowed; }
+    .empty { color: #888; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('index') }}">Approvals</a>
+    <a href="{{ url_for('rejected_page') }}">Rejected</a>
+    <a href="{{ url_for('franchises_page') }}">Manage Franchises</a>
+    <a href="{{ url_for('plex_page') }}">Plex Import</a>
+    <a class="active" href="{{ url_for('catalog_page') }}">Franchise Catalog</a>
+    <a href="{{ url_for('settings_page') }}">Settings</a>
+  </nav>
+
+  <h1>Franchise Catalog</h1>
+  <p class="intro">
+    Browsable list of known multimedia franchises, sourced from Wikipedia's
+    <a href="https://en.wikipedia.org/wiki/Lists_of_multimedia_franchises" target="_blank" rel="noopener">Lists of multimedia franchises</a>.
+    <strong>Quick Add</strong> creates a stub franchise using LLM-only
+    matching (Wikipedia's list doesn't give us a TMDB company/keyword ID
+    to filter on) — you'll land on the edit page afterward to pick its
+    MDBList list before it's usable. This does <em>not</em> auto-import
+    each franchise's actual movies and shows; use <a href="{{ url_for('plex_page') }}">Plex Import</a>'s
+    Check feature or a normal scan afterward for that, same as any other
+    LLM-only franchise.
+  </p>
+
+  {% if error %}
+    <div class="banner banner-error">✗ {{ error }}</div>
+  {% elif notice %}
+    <div class="banner banner-success">✓ {{ notice }}</div>
+  {% endif %}
+
+  {% if not franchises %}
+    <p class="empty">Nothing loaded yet.</p>
+  {% else %}
+    <div class="toolbar">
+      <input type="text" id="search-box" placeholder="Search franchises…">
+      <form method="post" action="{{ url_for('catalog_refresh') }}" style="margin: 0;">
+        <button class="refresh-btn" type="submit">Refresh from Wikipedia</button>
+      </form>
+    </div>
+    <div class="meta-line">
+      {{ franchises|length }} franchise{{ 's' if franchises|length != 1 else '' }} loaded
+      {% if fetched_at %}· cached since {{ fetched_at }}{% endif %}
+    </div>
+
+    {% set ns = namespace(current_category="") %}
+    {% for f in franchises %}
+      {% if f.category != ns.current_category %}
+        {% set ns.current_category = f.category %}
+        <h2 class="category-heading">{{ f.category }}</h2>
+      {% endif %}
+      {% set already_added = f.name.strip().lower() in existing_names %}
+      <div class="catalog-item" data-name="{{ f.name.lower() }}">
+        <div class="item-name">
+          <a href="{{ f.wiki_url }}" target="_blank" rel="noopener">{{ f.name }}</a>
+          {% if already_added %}<span class="item-added-badge">already added</span>{% endif %}
+        </div>
+        <form method="post" action="{{ url_for('catalog_add') }}">
+          <input type="hidden" name="name" value="{{ f.name }}">
+          <input type="hidden" name="wiki_url" value="{{ f.wiki_url }}">
+          <button class="add-btn" type="submit" {{ 'disabled' if already_added }}>
+            {{ 'Added' if already_added else 'Quick Add' }}
+          </button>
+        </form>
+      </div>
+    {% endfor %}
+  {% endif %}
+
+  <script>
+    const searchBox = document.getElementById('search-box');
+    if (searchBox) {
+      searchBox.addEventListener('input', () => {
+        const term = searchBox.value.trim().toLowerCase();
+        document.querySelectorAll('.catalog-item').forEach(item => {
+          const match = !term || item.dataset.name.includes(term);
+          item.classList.toggle('hidden', !match);
+        });
+        document.querySelectorAll('.category-heading').forEach(heading => {
+          let el = heading.nextElementSibling;
+          let anyVisible = false;
+          while (el && !el.classList.contains('category-heading')) {
+            if (el.classList.contains('catalog-item') && !el.classList.contains('hidden')) {
+              anyVisible = true;
+            }
+            el = el.nextElementSibling;
+          }
+          heading.style.display = anyVisible ? '' : 'none';
+        });
+      });
+    }
+  </script>
+</body>
+</html>

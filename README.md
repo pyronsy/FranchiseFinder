@@ -99,13 +99,53 @@ proportional to what's actually new), so items added before this feature
 existed will show a TMDB link only until they're rechecked or a franchise
 rescans them.
 
+## Franchise Catalog
+
+A browsable seed list of ~250 known multimedia franchises, sourced from
+Wikipedia's
+[Lists of multimedia franchises](https://en.wikipedia.org/wiki/Lists_of_multimedia_franchises),
+grouped by category (literary works, comics, animated TV, live-action TV,
+animated films, live-action films, video games with/without film-TV
+tie-ins) with a search box to filter.
+
+**What this does and doesn't do:** the catalog reliably gives you
+franchise **names and Wikipedia links** — that part is pulled from
+Wikipedia's raw wikitext via their API (not scraped HTML), which is
+stable since Wikipedia's `[[link]]` syntax is consistent even though
+rendered table layouts across different articles aren't. What it
+deliberately does **not** do is auto-import each franchise's actual
+movies and shows: most entries link to a franchise's general overview
+article rather than a dedicated filmography page, and the pages that do
+have one use inconsistent table structures — there's no reliable generic
+way to scrape "the media" for all ~250 of them, and this app isn't going
+to guess.
+
+Instead, **Quick Add** creates a stub franchise using **LLM-only
+matching** (`tmdb_filter.type: "none"`) with an `llm_hint` anchored to the
+franchise's name and Wikipedia link, then sends you to the edit form to
+pick its MDBList list — the one piece quick-add can't know for you. Once
+that's set, use [Plex Import](#plex-import)'s Check feature or a normal
+scan to actually populate its media, the same way any other LLM-only
+franchise works; that mechanism already handles "what belongs to this
+named franchise" reliably, which is a better fit for this problem than
+scraping ever would be.
+
+Quick Add requires an LLM provider configured on the Settings page first
+— refuses to create a franchise that would never find anything otherwise.
+Franchises you've already added show an **already added** badge and a
+disabled button so you don't accidentally create duplicates.
+
+The catalog is cached locally (`data/wikipedia_franchise_catalog.json`)
+after the first load — **Refresh from Wikipedia** forces a re-fetch if
+Wikipedia's list has changed since.
+
 ## Plex Import
 
 Normal scans only look for *new* TMDB releases. **Plex Import** does the
-opposite: it checks titles you **already own** in a Plex library against
-one franchise's criteria, and queues anything that matches but isn't in
-that franchise's MDBList list yet — through the same Approvals queue as a
-normal scan, tagged **in your Plex library**.
+opposite: it works from titles you **already own**. It's a two-step
+process — import a snapshot of a Plex library once, then check that
+stored snapshot against any number of franchises, independently and as
+many times as you want, without re-fetching from Plex each time.
 
 ### Setup
 
@@ -120,68 +160,88 @@ only needed for this feature):
 **Save & test connection** hits Plex's `/identity` endpoint to confirm
 both are correct before you rely on them.
 
-### Using it
+### Step 1 — Import
 
-On the **Plex Import** page, pick a franchise and a Plex library (movie or
-TV — populated live from your server), then run the check. What happens
-depends on that franchise's `tmdb_filter`:
+On the **Plex Import** page, pick a library (movie or TV — populated live
+from your server) and import it. This stores a snapshot in
+`data/plex_library.json` — not tied to any one franchise. Imports up to
+500 items per run; re-running (e.g. on a bigger library, or after adding
+new titles in Plex) only adds what's new, it never duplicates or resets
+anything already stored.
 
-- **company / keyword / network** — each Plex item's TMDB ID is checked
+Plex items without a recognizable TMDB ID in their metadata (rare, mostly
+very old legacy-agent libraries) get one title/year search against TMDB
+as a fallback during import; if that doesn't resolve either, they're
+skipped and the import result tells you how many.
+
+### Step 2 — Check against a franchise
+
+Each franchise on the Plex Import page shows how many stored items have
+been checked against it so far, how many matched, and how many are new
+since the last check. Click **Check** to process just the new ones —
+already-checked items for that franchise are always skipped, which is
+what makes checking against several franchises (or re-checking after a
+scan interval) cheap rather than reprocessing the whole library every
+time. What "checking" means depends on that franchise's `tmdb_filter`:
+
+- **company / keyword / network** — each item's TMDB ID is checked
   directly against TMDB's own data (production companies, keywords, or
   networks) for a match. No LLM involved, same criteria the normal scan
   uses, just checked in the opposite direction.
-- **none (LLM only)** — titles are sent to your configured LLM in
+- **none (LLM only)** — new items are sent to your configured LLM in
   batches (25 at a time, not one call per title) to judge which ones
   genuinely belong. The LLM classifies every title in the batch, in
   order — matches are identified by position, not by matching the
   LLM's returned text back to Plex's title string, since models often
   paraphrase titles slightly when echoing them back.
 
-Either way, items already in the target MDBList list, already pending, or
-already rejected are skipped automatically. Each run checks up to 500
-Plex items — large libraries may need more than one run, which is safe
-since already-processed items are always skipped on the next pass.
+Every checked item — match or not — gets a permanent notation recorded
+against that franchise, which is exactly what keeps future checks fast.
+If you change a franchise's `tmdb_filter` or `llm_hint`, its past
+classifications may no longer reflect the new criteria — use **Reset
+checks** on that franchise's row to clear its notation and re-evaluate
+everything on the next Check run (this doesn't touch any other
+franchise's history, or anything already in Approvals/Rejected).
 
-Plex items without a recognizable TMDB ID in their metadata (rare, mostly
-very old legacy-agent libraries) get one title/year search against TMDB
-as a fallback; if that doesn't resolve either, they're skipped and the
-result message tells you how many were skipped that way.
+Matches that aren't already in the target MDBList list, already pending,
+or already rejected land in the same **Approvals** queue as a normal
+scan, tagged **in your Plex library**.
 
-### LLM rate limits during a large Plex scan
+### LLM rate limits during a large check run
 
 A big library on an LLM-only franchise can mean a dozen-plus batched LLM
-calls in one run (25 titles per call). On a free-tier provider that's
-enough to trip a per-minute rate limit partway through. Every LLM call in
-the app — including these — automatically retries a 429 up to twice with
-backoff (respecting a `Retry-After` header if the provider sends one,
-otherwise 5s then 10s, capped at 30s), and there's also a small proactive
-1.5s gap between Plex batches specifically to make hitting the limit less
-likely in the first place. If a batch still fails after retrying, it's
-skipped (not the whole scan) and the result message tells you exactly
-which provider/limit hit and suggests trying again shortly — safe to
-re-run immediately, since already-processed items are always skipped.
+calls in one Check run (25 titles per call) — and since checked items are
+skipped on future runs, this cost is front-loaded onto the *first* check
+of a large library, not repeated every time. On a free-tier provider,
+that first run is enough to trip a per-minute rate limit partway through.
+Every LLM call in the app — including these — automatically retries a
+429 up to twice with backoff (respecting a `Retry-After` header if the
+provider sends one, otherwise 5s then 10s, capped at 30s), and there's
+also a small proactive 1.5s gap between batches specifically to make
+hitting the limit less likely in the first place. If a batch still fails
+after retrying, it's skipped (not the whole run, and not marked as
+checked — it'll be retried on the next Check click) and the result
+message tells you exactly which provider/limit hit and suggests trying
+again shortly.
 
-### If a scan finds zero matches
+### If a check finds zero matches
 
-The result message breaks down the full funnel — items fetched from Plex,
-how many resolved to a TMDB ID, how many were already in the target
-list/queue/rejected, how many were actually checked, and how many
-matched. That breakdown usually tells you exactly where the count drops
-to zero without needing to guess:
+The result message breaks down the funnel — how many items were newly
+checked (vs. already checked and skipped) and how many matched. That
+breakdown usually tells you exactly what's going on without needing to
+guess:
 
-- **Fetched is 0** — wrong library selected, or Plex isn't returning
-  results for that library key.
-- **Resolved is much lower than fetched** — many items lack a TMDB-linked
-  GUID in Plex's metadata; check the app logs for per-item resolution
-  failures.
-- **Already-excluded accounts for most/all of it** — expected behavior,
-  not a bug: those items are already in the target MDBList list or
-  already sitting in your Approvals/Rejected queues.
+- **New-to-check is 0** — nothing to investigate; everything stored has
+  already been checked against this franchise. Use **Reset checks** if
+  you want a fresh pass under updated criteria.
 - **Checked is nonzero but matches is 0** — for LLM-only franchises, check
   the app logs: a 0-match batch that parsed cleanly gets logged at info
   level with the raw LLM response, so you can see whether the model
   genuinely found nothing or is being unexpectedly conservative (often
   fixable by tightening or loosening the franchise's `llm_hint`).
+- **Import result showed a low import count** — check the import
+  message's unresolved count; items without a resolvable TMDB ID never
+  make it into the stored snapshot at all.
 
 ## Getting API keys
 
@@ -407,7 +467,8 @@ this locally, see Quick Start above.
 app.py                          # scan loop + Flask web UI
 templates/index.html            # approval queue page
 templates/rejected.html         # rejected items — recheck or delete permanently
-templates/plex.html             # cross-reference a Plex library against a franchise
+templates/plex.html             # import + check a Plex library against franchises
+templates/catalog.html          # browsable Wikipedia franchise catalog + quick add
 templates/franchises.html       # add/edit/delete franchises
 templates/settings.html         # TMDB/MDBList keys + LLM provider settings
 config/franchises.example.json  # reference template for franchises.json (or just use the UI)
@@ -423,6 +484,8 @@ At runtime (not part of the repo), the container also uses:
 config/settings.json            # all API keys/settings, written by the Settings page
 config/franchises.json          # your actual franchises, written by the Manage Franchises page
 data/                           # per-franchise pending/rejected approval state
+data/plex_library.json          # stored Plex snapshot + per-franchise checked notations
+data/wikipedia_franchise_catalog.json  # cached Wikipedia franchise catalog
 ```
 
 ## License

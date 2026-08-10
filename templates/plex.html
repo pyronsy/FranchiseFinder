@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <title>FranchiseFinder — Plex Import</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; background: #111; color: #eee; }
+    body { font-family: system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 16px; background: #111; color: #eee; }
     h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.1rem; margin-top: 32px; border-bottom: 1px solid #333; padding-bottom: 6px; }
     p.intro { color: #999; font-size: 0.9rem; }
     p.intro a { color: #7aa2f7; }
     nav { margin-bottom: 20px; }
@@ -28,6 +29,17 @@
     .scan { background: #2e7d32; color: white; }
     .scan:disabled { background: #333; color: #888; cursor: not-allowed; }
     .empty { color: #888; }
+    .library-status { color: #b7cde6; font-size: 0.9rem; margin-bottom: 16px; }
+
+    .franchise-row { display: flex; justify-content: space-between; align-items: center; padding: 12px; border: 1px solid #333; border-radius: 8px; margin-bottom: 10px; }
+    .franchise-meta { display: flex; flex-direction: column; }
+    .franchise-name { font-weight: 600; }
+    .franchise-stats { color: #999; font-size: 0.85rem; margin-top: 2px; }
+    .franchise-actions { display: flex; gap: 6px; }
+    .franchise-actions form { display: inline; }
+    .check-btn { background: #2e7d32; color: white; padding: 6px 12px; font-size: 0.85rem; }
+    .check-btn:disabled { background: #333; color: #888; cursor: not-allowed; }
+    .reset-btn { background: #333; color: #ccc; padding: 6px 12px; font-size: 0.8rem; }
   </style>
 </head>
 <body>
@@ -36,63 +48,48 @@
     <a href="{{ url_for('rejected_page') }}">Rejected</a>
     <a href="{{ url_for('franchises_page') }}">Manage Franchises</a>
     <a class="active" href="{{ url_for('plex_page') }}">Plex Import</a>
+    <a href="{{ url_for('catalog_page') }}">Franchise Catalog</a>
     <a href="{{ url_for('settings_page') }}">Settings</a>
   </nav>
 
   <h1>Plex Import</h1>
   <p class="intro">
-    Checks titles already in a Plex library against one franchise's
-    criteria, and queues anything that matches but isn't in that
-    franchise's MDBList list yet — same approval queue as a normal scan,
-    just sourced from what you already own instead of new TMDB releases.
+    Import a snapshot of a Plex library once, then check it against as
+    many franchises as you want without re-fetching from Plex each time.
+    Each item remembers which franchises it's already been checked
+    against, so re-running only processes what's actually new — cheaper,
+    faster, and safe to run repeatedly.
   </p>
+
+  {% if scan_result == 'error' %}
+    <div class="banner banner-error">✗ {{ scan_message }}</div>
+  {% elif scan_result == 'done' %}
+    <div class="banner banner-success">✓ {{ scan_message }} <a href="{{ url_for('index') }}">View Approvals</a></div>
+  {% endif %}
+
+  <h2>1. Import from Plex</h2>
 
   {% if not plex_configured %}
     <p class="empty">
       Plex isn't configured yet. <a href="{{ url_for('settings_page') }}">Add your server URL and token on the Settings page</a> first.
     </p>
-  {% elif not franchises %}
-    <p class="empty">
-      No franchises configured yet. <a href="{{ url_for('franchises_page') }}">Add one</a> first.
-    </p>
   {% else %}
+    <p class="library-status">
+      Stored library: <strong>{{ library_count }}</strong> item{{ 's' if library_count != 1 else '' }} imported so far.
+    </p>
 
-    {% if scan_result == 'error' %}
-      <div class="banner banner-error">✗ {{ scan_message }}</div>
-    {% elif scan_result == 'done' %}
-      <div class="banner banner-success">✓ {{ scan_message }} <a href="{{ url_for('index') }}">View Approvals</a></div>
-    {% endif %}
-
-    <form class="editor" method="post" action="{{ url_for('plex_scan') }}" id="plex-scan-form"
-          onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = 'Checking your library… this can take a while for large libraries';">
-      <label>
-        Franchise
-        <select name="franchise_id" required>
-          {% for f in franchises %}
-            <option value="{{ f.id }}">{{ f.name }}</option>
-          {% endfor %}
-        </select>
-      </label>
-
+    <form class="editor" method="post" action="{{ url_for('plex_import') }}" id="plex-import-form"
+          onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = 'Importing… this can take a while for large libraries';">
       <label>
         Plex library
         <select name="library_key" id="library-select" required>
           <option value="">Loading your Plex libraries…</option>
         </select>
-        <div class="hint-text" id="library-hint">Movie and TV libraries only.</div>
+        <div class="hint-text" id="library-hint">Movie and TV libraries only. Imports up to 500 items per run — re-run to add more from a larger library, already-imported items are never duplicated or reset.</div>
       </label>
 
-      <div class="hint-text" style="margin-top: 14px;">
-        Checks up to 500 items per run (large libraries may need more than
-        one run — anything already queued, rejected, or already in the
-        target list is skipped automatically, so re-running is safe).
-        Franchises using company/keyword/network filters are checked
-        directly against TMDB; franchises set to "None (LLM only)" are
-        checked in batches through your configured LLM instead.
-      </div>
-
       <div class="submit-row">
-        <button class="scan" type="submit" id="scan-button" disabled>Check this library against this franchise</button>
+        <button class="scan" type="submit" id="import-button" disabled>Import this library</button>
       </div>
     </form>
 
@@ -100,7 +97,7 @@
       (function () {
         const select = document.getElementById('library-select');
         const hint = document.getElementById('library-hint');
-        const scanButton = document.getElementById('scan-button');
+        const importButton = document.getElementById('import-button');
 
         fetch('{{ url_for("plex_libraries") }}')
           .then(r => r.json())
@@ -121,13 +118,53 @@
               opt.textContent = `${lib.title} (${lib.type})`;
               select.appendChild(opt);
             });
-            scanButton.disabled = false;
+            importButton.disabled = false;
           })
           .catch(() => {
             select.innerHTML = '<option value="">Unavailable — check your connection</option>';
           });
       })();
     </script>
+  {% endif %}
+
+  <h2>2. Check your stored library against a franchise</h2>
+
+  {% if not plex_configured %}
+    <p class="empty">Configure Plex above first.</p>
+  {% elif library_count == 0 %}
+    <p class="empty">Import a library above first — nothing stored yet.</p>
+  {% elif not franchise_stats %}
+    <p class="empty">
+      No franchises configured yet. <a href="{{ url_for('franchises_page') }}">Add one</a> first.
+    </p>
+  {% else %}
+    {% for f in franchise_stats %}
+      <div class="franchise-row">
+        <div class="franchise-meta">
+          <span class="franchise-name">{{ f.name }}</span>
+          <span class="franchise-stats">
+            {{ f.checked_count }}/{{ library_count }} checked
+            {% if f.matched_count %} · {{ f.matched_count }} matched so far{% endif %}
+            {% if f.unchecked_count %} · {{ f.unchecked_count }} new to check{% endif %}
+          </span>
+        </div>
+        <div class="franchise-actions">
+          <form method="post" action="{{ url_for('plex_check') }}"
+                onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = 'Checking…';">
+            <input type="hidden" name="franchise_id" value="{{ f.id }}">
+            <button class="check-btn" type="submit" {{ 'disabled' if f.unchecked_count == 0 }}>
+              {{ 'Check ' ~ f.unchecked_count ~ ' new item(s)' if f.unchecked_count else 'Up to date' }}
+            </button>
+          </form>
+          {% if f.checked_count %}
+            <form method="post" action="{{ url_for('plex_reset_checks', franchise_id=f.id) }}"
+                  onsubmit="return confirm('Clear check history for {{ f.name }}? All {{ f.checked_count }} checked item(s) will be re-evaluated on the next Check run.');">
+              <button class="reset-btn" type="submit">Reset checks</button>
+            </form>
+          {% endif %}
+        </div>
+      </div>
+    {% endfor %}
   {% endif %}
 </body>
 </html>

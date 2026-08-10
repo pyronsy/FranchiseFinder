@@ -17,6 +17,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -242,6 +243,25 @@ def load_rejected(franchise_id: str) -> dict:
 
 def save_rejected(franchise_id: str, data: dict) -> None:
     _save(_state_path(franchise_id, "rejected.json"), data)
+
+
+PLEX_LIBRARY_FILE_NAME = "plex_library.json"
+
+
+def load_plex_library() -> dict:
+    """
+    Returns the stored Plex library snapshot: {key: {tmdb_id, media_type,
+    title, year, imdb_id, checked: {franchise_id: {result, checked_at}}}}.
+    Not per-franchise like pending/rejected — one shared snapshot covers
+    all franchises, since the whole point is checking the same imported
+    list against multiple franchises without re-importing from Plex.
+    """
+    return _load(DATA_DIR / PLEX_LIBRARY_FILE_NAME)
+
+
+def save_plex_library(data: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _save(DATA_DIR / PLEX_LIBRARY_FILE_NAME, data)
 
 
 # --------------------------------------------------------------------------
@@ -867,6 +887,123 @@ listed above exactly.
 
 
 # --------------------------------------------------------------------------
+# Wikipedia franchise catalog
+# --------------------------------------------------------------------------
+
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+WIKIPEDIA_FRANCHISE_LIST_TITLE = "Lists_of_multimedia_franchises"
+WIKIPEDIA_USER_AGENT = "FranchiseFinder/1.0 (https://github.com/pyronsy/FranchiseFinder; self-hosted Plex collection curator)"
+WIKIPEDIA_CATALOG_FILE_NAME = "wikipedia_franchise_catalog.json"
+
+_WIKI_SECTION_RE = re.compile(r"^==\s*(.+?)\s*==\s*$")
+_WIKI_LINK_RE = re.compile(r"\[\[([^\]|#]+)(?:\|([^\]]+))?\]\]")
+_WIKI_IGNORED_PREFIXES = {"File", "Category", "Special", "Help", "Wikipedia", "Template", "Portal"}
+
+
+def load_wikipedia_catalog_cache() -> dict:
+    return _load(DATA_DIR / WIKIPEDIA_CATALOG_FILE_NAME)
+
+
+def save_wikipedia_catalog_cache(data: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _save(DATA_DIR / WIKIPEDIA_CATALOG_FILE_NAME, data)
+
+
+def fetch_wikipedia_franchise_catalog_live() -> list:
+    """
+    Fetches https://en.wikipedia.org/wiki/Lists_of_multimedia_franchises via
+    the MediaWiki API as raw wikitext (not rendered HTML — far more
+    reliable to parse than scraping HTML tables, since Wikipedia's
+    [[link]] syntax and == heading == syntax are consistent even though
+    rendered table layouts across articles are not) and extracts the
+    categorized list of franchise names + links.
+
+    This deliberately only extracts NAMES and links, not each franchise's
+    actual movies/shows: most entries link to a franchise's general
+    overview article rather than a dedicated filmography page, and the
+    ones that do have one use inconsistent table layouts across articles
+    — there's no reliable generic way to scrape "the movies and shows"
+    for all ~250 of these. Once a franchise is added from this catalog,
+    use the app's existing LLM-only matching (Plex Import's Check, or a
+    normal scan) to actually populate its media — that mechanism already
+    handles "what belongs to this named franchise" reliably.
+    """
+    resp = requests.get(
+        WIKIPEDIA_API_URL,
+        params={
+            "action": "query",
+            "prop": "revisions",
+            "titles": WIKIPEDIA_FRANCHISE_LIST_TITLE,
+            "rvslots": "main",
+            "rvprop": "content",
+            "format": "json",
+        },
+        headers={"User-Agent": WIKIPEDIA_USER_AGENT},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    pages = data.get("query", {}).get("pages", {})
+    wikitext = ""
+    for page in pages.values():
+        revisions = page.get("revisions", [])
+        if revisions:
+            slot = revisions[0].get("slots", {}).get("main", {})
+            wikitext = slot.get("*", "") or slot.get("content", "")
+            break
+
+    if not wikitext:
+        raise ValueError("Wikipedia API returned no page content — the article may have been renamed or removed.")
+
+    franchises = []
+    seen_urls = set()
+    current_section = ""
+
+    for line in wikitext.splitlines():
+        section_match = _WIKI_SECTION_RE.match(line.strip())
+        if section_match:
+            current_section = section_match.group(1).strip()
+            continue
+        if not current_section.lower().startswith("franchises originating in"):
+            continue
+        for target, display in _WIKI_LINK_RE.findall(line):
+            target = target.strip()
+            if not target:
+                continue
+            prefix = target.split(":")[0]
+            if prefix in _WIKI_IGNORED_PREFIXES:
+                continue
+            name = (display or target).strip()
+            if not name:
+                continue
+            wiki_url = "https://en.wikipedia.org/wiki/" + target.replace(" ", "_")
+            key = wiki_url.lower()
+            if key in seen_urls:
+                continue
+            seen_urls.add(key)
+            franchises.append({"category": current_section, "name": name, "wiki_url": wiki_url})
+
+    return franchises
+
+
+def get_wikipedia_franchise_catalog(force_refresh: bool = False) -> dict:
+    """
+    Returns {"fetched_at": iso_str, "franchises": [...]}. Uses the cached
+    copy in data/wikipedia_franchise_catalog.json unless force_refresh is
+    True or nothing is cached yet — avoids hitting Wikipedia on every page
+    load for a list that changes infrequently.
+    """
+    cache = load_wikipedia_catalog_cache()
+    if not force_refresh and cache.get("franchises"):
+        return cache
+    franchises = fetch_wikipedia_franchise_catalog_live()
+    cache = {"fetched_at": datetime.now(timezone.utc).isoformat(), "franchises": franchises}
+    save_wikipedia_catalog_cache(cache)
+    return cache
+
+
+# --------------------------------------------------------------------------
 # MDBList
 # --------------------------------------------------------------------------
 
@@ -1097,6 +1234,13 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
     mdblist_api_key = core["mdblist_api_key"]
     warnings = []
     log.info("Scanning %s...", fname)
+
+    if not franchise.get("mdblist_list_id"):
+        return {
+            "new_count": 0,
+            "error": f"{fname} has no MDBList list configured yet — edit it on Manage Franchises to set one.",
+            "warnings": warnings,
+        }
 
     try:
         current = get_current_mdblist_tmdb_ids(franchise["mdblist_list_id"], mdblist_api_key)
@@ -1341,9 +1485,31 @@ def reject(franchise_id: str, media_type: str, tmdb_id: str):
 @app.get("/plex")
 def plex_page():
     core = load_core_settings()
+    franchises = load_franchises()
+    library = load_plex_library()
+
+    franchise_stats = []
+    for f in franchises:
+        checked_count = sum(1 for v in library.values() if f["id"] in v.get("checked", {}))
+        matched_count = sum(
+            1
+            for v in library.values()
+            if v.get("checked", {}).get(f["id"], {}).get("result") == "match"
+        )
+        franchise_stats.append(
+            {
+                "id": f["id"],
+                "name": f["name"],
+                "checked_count": checked_count,
+                "unchecked_count": len(library) - checked_count,
+                "matched_count": matched_count,
+            }
+        )
+
     return render_template(
         "plex.html",
-        franchises=load_franchises(),
+        franchise_stats=franchise_stats,
+        library_count=len(library),
         plex_configured=bool(core["plex_url"] and core["plex_token"]),
         scan_result=request.args.get("scan_result"),
         scan_message=request.args.get("scan_message"),
@@ -1363,10 +1529,16 @@ def plex_libraries():
     return jsonify({"libraries": libraries, "error": None})
 
 
-@app.post("/plex/scan")
-def plex_scan():
+@app.post("/plex/import")
+def plex_import():
+    """
+    Fetches a Plex library and merges it into the stored snapshot
+    (config-independent of any single franchise). Items already in the
+    snapshot are left untouched, including their existing per-franchise
+    checked notations — importing again (e.g. after adding new titles to
+    Plex) only adds what's new, it never resets prior check history.
+    """
     core = load_core_settings()
-    franchise_id = request.form.get("franchise_id", "")
     library_key = request.form.get("library_key", "")
 
     if not core["plex_url"] or not core["plex_token"]:
@@ -1376,143 +1548,214 @@ def plex_scan():
     if not library_key:
         return redirect(url_for("plex_page", scan_result="error", scan_message="Pick a Plex library first."))
 
-    franchise = get_franchise(franchise_id)
-
     try:
         plex_items = get_plex_library_items(core["plex_url"], core["plex_token"], library_key)
     except requests.RequestException as exc:
         return redirect(url_for("plex_page", scan_result="error", scan_message=f"Could not read Plex library: {exc}"))
-
-    try:
-        current = get_current_mdblist_tmdb_ids(franchise["mdblist_list_id"], core["mdblist_api_key"])
-    except requests.RequestException as exc:
-        return redirect(url_for("plex_page", scan_result="error", scan_message=f"Could not read MDBList list: {exc}"))
-
-    pending = load_pending(franchise["id"])
-    rejected = load_rejected(franchise["id"])
-    tmdb_filter = franchise["tmdb_filter"]
-    is_llm_only = tmdb_filter.get("type") == "none"
 
     # Resolve any Plex items missing a TMDB ID (legacy-agent libraries) by title/year search.
     for item in plex_items:
         if not item["tmdb_id"]:
             item["tmdb_id"] = resolve_tmdb_id(item["title"], item["year"], item["media_type"], core["tmdb_api_key"])
 
-    checkable = [i for i in plex_items if i["tmdb_id"]]
-    unresolved_count = len(plex_items) - len(checkable)
+    resolved = [i for i in plex_items if i["tmdb_id"]]
+    unresolved_count = len(plex_items) - len(resolved)
 
-    # Skip anything already in the target list or already queued/rejected.
-    to_check = [
-        i for i in checkable
-        if (i["media_type"], i["tmdb_id"]) not in current
-        and f"{i['media_type']}:{i['tmdb_id']}" not in pending
-        and f"{i['media_type']}:{i['tmdb_id']}" not in rejected
-    ]
-    already_excluded_count = len(checkable) - len(to_check)
+    library = load_plex_library()
+    added_count = 0
+    for i in resolved:
+        key = f"{i['media_type']}:{i['tmdb_id']}"
+        if key in library:
+            continue  # already imported — keep it and its existing checked notations as-is
+        library[key] = {
+            "tmdb_id": i["tmdb_id"],
+            "media_type": i["media_type"],
+            "title": i["title"],
+            "year": i["year"],
+            "imdb_id": get_imdb_id(i["media_type"], i["tmdb_id"], core["tmdb_api_key"]),
+            "checked": {},
+        }
+        added_count += 1
+    save_plex_library(library)
+
+    already_had_count = len(resolved) - added_count
+    msg = (
+        f"Imported {added_count} new item(s) from Plex into your stored library "
+        f"({already_had_count} were already imported, {unresolved_count} had no TMDB match "
+        f"and were skipped). Stored library now has {len(library)} item(s) total."
+    )
+    return redirect(url_for("plex_page", scan_result="done", scan_message=msg))
+
+
+@app.post("/plex/check")
+def plex_check():
+    """
+    Runs the STORED Plex library snapshot against one franchise, skipping
+    any item already checked against that specific franchise (tracked per
+    item under "checked"). This is what makes checking against multiple
+    franchises cheap — no re-fetching Plex, and no re-classifying titles
+    an LLM-only franchise has already judged.
+    """
+    core = load_core_settings()
+    franchise_id = request.form.get("franchise_id", "")
+    franchise = get_franchise(franchise_id)
+
+    library = load_plex_library()
+    if not library:
+        return redirect(
+            url_for("plex_page", scan_result="error", scan_message="No Plex library imported yet — import one first.")
+        )
+
+    if not franchise.get("mdblist_list_id"):
+        return redirect(
+            url_for(
+                "plex_page",
+                scan_result="error",
+                scan_message=f"{franchise['name']} has no MDBList list configured yet — edit it on Manage Franchises to set one.",
+            )
+        )
+
+    try:
+        current = get_current_mdblist_tmdb_ids(franchise["mdblist_list_id"], core["mdblist_api_key"])
+    except requests.RequestException as exc:
+        return redirect(url_for("plex_page", scan_result="error", scan_message=f"Could not read MDBList list: {exc}"))
+
+    pending = load_pending(franchise_id)
+    rejected = load_rejected(franchise_id)
+    tmdb_filter = franchise["tmdb_filter"]
+    is_llm_only = tmdb_filter.get("type") == "none"
+
+    if is_llm_only and load_llm_settings().get("provider", "none") == "none":
+        return redirect(
+            url_for(
+                "plex_page",
+                scan_result="error",
+                scan_message=f"{franchise['name']} is set to \"None (LLM only)\" but no LLM provider is configured.",
+            )
+        )
+
+    to_check_keys = [k for k, v in library.items() if franchise_id not in v.get("checked", {})]
+    already_checked_count = len(library) - len(to_check_keys)
 
     log.info(
-        "[%s] Plex scan funnel: fetched=%d resolved_to_tmdb=%d "
-        "already_listed_or_queued_or_rejected=%d to_check=%d",
-        franchise["id"],
-        len(plex_items),
-        len(checkable),
-        already_excluded_count,
-        len(to_check),
+        "[%s] Plex check funnel: stored=%d already_checked=%d to_check=%d",
+        franchise_id,
+        len(library),
+        already_checked_count,
+        len(to_check_keys),
     )
 
     new_finds = []
     llm_batch_failures = 0
+    last_llm_error_message = ""
+    now = datetime.now(timezone.utc).isoformat()
+
+    def already_queued(item: dict) -> bool:
+        key = f"{item['media_type']}:{item['tmdb_id']}"
+        return (item["media_type"], item["tmdb_id"]) in current or key in pending or key in rejected
 
     if is_llm_only:
-        if load_llm_settings().get("provider", "none") == "none":
-            return redirect(
-                url_for(
-                    "plex_page",
-                    scan_result="error",
-                    scan_message=f"{franchise['name']} is set to \"None (LLM only)\" but no LLM provider is configured.",
-                )
-            )
         batch_size = 25
-        last_llm_error_message = ""
-        for i in range(0, len(to_check), batch_size):
+        for i in range(0, len(to_check_keys), batch_size):
             if i > 0:
-                # Small proactive gap between batches — a large library can mean
-                # a dozen-plus calls back-to-back, which is exactly the kind of
-                # burst that trips a free-tier per-minute rate limit in the
-                # first place. This doesn't guarantee avoiding it (see the
-                # retry-with-backoff inside call_llm_with_retry for that), but
-                # it meaningfully reduces how often it happens.
-                time.sleep(1.5)
-            batch = to_check[i : i + batch_size]
+                time.sleep(1.5)  # small proactive gap — see call_llm_with_retry for the reactive side
+            batch_keys = to_check_keys[i : i + batch_size]
+            batch_items = [library[k] for k in batch_keys]
             try:
-                classifications = llm_classify_plex_batch(franchise, batch)
+                classifications = llm_classify_plex_batch(franchise, batch_items)
             except (requests.RequestException, ValueError) as exc:
                 last_llm_error_message = _friendly_llm_error(
                     exc, load_llm_settings().get("provider", ""), context="plex_import"
                 )
-                log.warning("[%s] Plex LLM classification failed: %s", franchise["id"], last_llm_error_message)
+                log.warning("[%s] Plex LLM classification failed: %s", franchise_id, last_llm_error_message)
                 llm_batch_failures += 1
                 continue
-            for idx, plex_item in enumerate(batch):
+            for idx, key in enumerate(batch_keys):
+                lib_item = library[key]
                 c = classifications[idx] if idx < len(classifications) else None
-                if not isinstance(c, dict):
-                    continue
-                belongs = c.get("belongs")
-                belongs = belongs is True or (
-                    isinstance(belongs, str) and belongs.strip().lower() == "true"
+                belongs = isinstance(c, dict) and (
+                    c.get("belongs") is True
+                    or (isinstance(c.get("belongs"), str) and c.get("belongs").strip().lower() == "true")
                 )
-                if not belongs:
-                    continue
-                key = f"{plex_item['media_type']}:{plex_item['tmdb_id']}"
-                item = {
-                    "tmdb_id": plex_item["tmdb_id"],
-                    "media_type": plex_item["media_type"],
-                    "title": plex_item["title"],
-                    "year": plex_item["year"],
-                    "source": "plex",
-                    "reasoning": c.get("reasoning") or "Matched by the LLM against your Plex library.",
-                    "llm_reasoning": True,
-                    "imdb_id": get_imdb_id(plex_item["media_type"], plex_item["tmdb_id"], core["tmdb_api_key"]),
+                reasoning = (c.get("reasoning") if isinstance(c, dict) else "") or ""
+                lib_item["checked"][franchise_id] = {
+                    "result": "match" if belongs else "no_match",
+                    "checked_at": now,
                 }
-                pending[key] = item
-                new_finds.append(item)
+                if belongs and not already_queued(lib_item):
+                    new_item = {
+                        "tmdb_id": lib_item["tmdb_id"],
+                        "media_type": lib_item["media_type"],
+                        "title": lib_item["title"],
+                        "year": lib_item["year"],
+                        "source": "plex",
+                        "reasoning": reasoning or "Matched by the LLM against your Plex library.",
+                        "llm_reasoning": True,
+                        "imdb_id": lib_item.get("imdb_id", ""),
+                    }
+                    pending[key] = new_item
+                    new_finds.append(new_item)
     else:
-        for plex_item in to_check:
-            is_match = matches_tmdb_filter(plex_item["media_type"], plex_item["tmdb_id"], tmdb_filter, core["tmdb_api_key"])
-            if not is_match:
-                continue
-            key = f"{plex_item['media_type']}:{plex_item['tmdb_id']}"
-            item = {
-                "tmdb_id": plex_item["tmdb_id"],
-                "media_type": plex_item["media_type"],
-                "title": plex_item["title"],
-                "year": plex_item["year"],
-                "source": "plex",
-                "reasoning": (
-                    f"Already in your Plex library and matches the TMDB "
-                    f"{tmdb_filter['type']} filter configured for {franchise['name']}."
-                ),
-                "llm_reasoning": False,
-                "imdb_id": get_imdb_id(plex_item["media_type"], plex_item["tmdb_id"], core["tmdb_api_key"]),
+        for key in to_check_keys:
+            lib_item = library[key]
+            is_match = matches_tmdb_filter(lib_item["media_type"], lib_item["tmdb_id"], tmdb_filter, core["tmdb_api_key"])
+            lib_item["checked"][franchise_id] = {
+                "result": "match" if is_match else "no_match",
+                "checked_at": now,
             }
-            pending[key] = item
-            new_finds.append(item)
+            if is_match and not already_queued(lib_item):
+                new_item = {
+                    "tmdb_id": lib_item["tmdb_id"],
+                    "media_type": lib_item["media_type"],
+                    "title": lib_item["title"],
+                    "year": lib_item["year"],
+                    "source": "plex",
+                    "reasoning": (
+                        f"Already in your Plex library and matches the TMDB "
+                        f"{tmdb_filter['type']} filter configured for {franchise['name']}."
+                    ),
+                    "llm_reasoning": False,
+                    "imdb_id": lib_item.get("imdb_id", ""),
+                }
+                pending[key] = new_item
+                new_finds.append(new_item)
 
+    save_plex_library(library)
     if new_finds:
-        save_pending(franchise["id"], pending)
+        save_pending(franchise_id, pending)
 
     msg = (
-        f"Checked {len(plex_items)} Plex item(s) from this library — "
-        f"{len(checkable)} resolved to a TMDB ID, "
-        f"{already_excluded_count} already in the list/queue/rejected, "
-        f"{len(to_check)} actually checked against {franchise['name']}, "
-        f"found {len(new_finds)} match(es), added to Approvals."
+        f"Checked {len(to_check_keys)} new item(s) from your stored Plex library against "
+        f"{franchise['name']} ({already_checked_count} were already checked previously and "
+        f"skipped) — found {len(new_finds)} match(es), added to Approvals."
     )
-    if unresolved_count:
-        msg += f" {unresolved_count} item(s) had no TMDB match and were skipped."
     if llm_batch_failures:
-        msg += f" {llm_batch_failures} LLM batch(es) failed and were skipped: {last_llm_error_message}"
+        msg += f" {llm_batch_failures} LLM batch(es) failed: {last_llm_error_message}"
     return redirect(url_for("plex_page", scan_result="done", scan_message=msg))
+
+
+@app.post("/plex/reset-checks/<franchise_id>")
+def plex_reset_checks(franchise_id: str):
+    """
+    Clears this franchise's checked notation from every item in the
+    stored Plex library, so the next Check run re-evaluates everything —
+    useful after changing the franchise's tmdb_filter or llm_hint, when
+    past classifications may no longer reflect the current criteria.
+    """
+    library = load_plex_library()
+    cleared = 0
+    for item in library.values():
+        if franchise_id in item.get("checked", {}):
+            del item["checked"][franchise_id]
+            cleared += 1
+    save_plex_library(library)
+    return redirect(
+        url_for(
+            "plex_page",
+            scan_result="done",
+            scan_message=f"Cleared check history for {cleared} item(s) — they'll be re-evaluated on the next Check run.",
+        )
+    )
 
 
 @app.get("/rejected")
@@ -1889,6 +2132,89 @@ def franchises_mdblist_lists():
     except requests.RequestException as exc:
         return jsonify({"lists": [], "error": f"Could not reach MDBList: {exc}"})
     return jsonify({"lists": lists, "error": None})
+
+
+@app.get("/catalog")
+def catalog_page():
+    error = None
+    try:
+        cache = get_wikipedia_franchise_catalog()
+    except (requests.RequestException, ValueError) as exc:
+        cache = load_wikipedia_catalog_cache()
+        error = f"Could not refresh from Wikipedia: {exc}"
+        if cache.get("franchises"):
+            error += " Showing your last cached copy."
+
+    existing_names = {f["name"].strip().lower() for f in load_franchises()}
+
+    return render_template(
+        "catalog.html",
+        franchises=cache.get("franchises", []),
+        fetched_at=cache.get("fetched_at"),
+        existing_names=existing_names,
+        error=error or request.args.get("error"),
+        notice=request.args.get("notice"),
+    )
+
+
+@app.post("/catalog/refresh")
+def catalog_refresh():
+    try:
+        get_wikipedia_franchise_catalog(force_refresh=True)
+    except (requests.RequestException, ValueError) as exc:
+        return redirect(url_for("catalog_page", error=f"Could not refresh from Wikipedia: {exc}"))
+    return redirect(url_for("catalog_page", notice="Catalog refreshed from Wikipedia."))
+
+
+@app.post("/catalog/add")
+def catalog_add():
+    """
+    Creates a stub franchise from a catalog entry — LLM-only matching by
+    default (Wikipedia's list doesn't give us a TMDB company/keyword ID to
+    filter on), with an llm_hint anchored to the franchise name and its
+    Wikipedia link. Sends the user straight to the edit form afterward
+    since an MDBList list still needs to be picked before this franchise
+    is actually usable — quick-add gets the name and hint right, not the
+    whole setup.
+    """
+    name = request.form.get("name", "").strip()
+    wiki_url = request.form.get("wiki_url", "").strip()
+
+    if not name:
+        return redirect(url_for("catalog_page", error="Missing franchise name."))
+
+    if load_llm_settings().get("provider", "none") == "none":
+        return redirect(
+            url_for(
+                "catalog_page",
+                error=(
+                    f"Adding \"{name}\" needs an LLM provider configured on the Settings page "
+                    f"first — catalog franchises default to LLM-only matching."
+                ),
+            )
+        )
+
+    franchises = load_franchises()
+    existing_ids = {f["id"] for f in franchises}
+    franchise_id = unique_id(slugify(name), existing_ids)
+
+    llm_hint = f'Only include official movies and TV shows that are genuinely part of the "{name}" franchise.'
+    if wiki_url:
+        llm_hint += f" Background: {wiki_url}"
+
+    franchises.append(
+        {
+            "id": franchise_id,
+            "name": name,
+            "mdblist_list_id": "",
+            "tmdb_filter": {"type": "none", "id": 0},
+            "exclude_title_keywords": [],
+            "exclude_tmdb_ids": [],
+            "llm_hint": llm_hint,
+        }
+    )
+    save_franchises(franchises)
+    return redirect(url_for("franchises_edit_form", franchise_id=franchise_id))
 
 
 @app.get("/franchises")
