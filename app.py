@@ -464,14 +464,15 @@ def llm_gap_and_annotate(franchise: dict, filter_matched: list, known_titles: li
        justification for why it belongs in the franchise.
     2. Suggests any other titles that are missing from the list entirely.
 
-    Returns {"annotations": {title: reasoning}, "missing": [{title, year,
-    media_type, reasoning}, ...]}. Raises requests.RequestException or
-    ValueError on failure — callers should catch and use
-    _friendly_llm_error() to report it.
+    Returns {"annotations_by_order": [reasoning_or_none, ...] aligned with
+    filter_matched, "annotations_by_title": {title_lower: reasoning},
+    "missing": [{title, year, media_type, reasoning}, ...]}. Raises
+    requests.RequestException or ValueError on failure — callers should
+    catch and use _friendly_llm_error() to report it.
     """
     settings = load_llm_settings()
     if settings.get("provider", "none") == "none":
-        return {"annotations": {}, "missing": []}
+        return {"annotations_by_order": [], "annotations_by_title": {}, "missing": []}
 
     hint = franchise.get("llm_hint", "")
     known_block = "\n".join(f"- {t}" for t in sorted(known_titles)) or "(list is currently empty)"
@@ -509,18 +510,26 @@ exact shape:
   "missing": [{{"title": "...", "year": "YYYY", "media_type": "movie" or "tv", "reasoning": "one short sentence"}}]
 }}
 
-Include exactly one annotation per candidate listed above, in the same
-order, even if the list is empty. If nothing is missing, use an empty
-array for "missing".
+The "annotations" array must have exactly one entry per candidate listed
+above, in the exact same order — this is required even if you leave the
+candidates list empty (then "annotations" is also empty). If nothing is
+missing, use an empty array for "missing".
 """
 
     raw = call_llm(prompt, settings)
     parsed = _extract_json_object(raw)
 
-    annotations = {}
-    for a_item in parsed.get("annotations", []) if isinstance(parsed, dict) else []:
+    raw_annotations = parsed.get("annotations", []) if isinstance(parsed, dict) else []
+
+    annotations_by_order = [
+        a_item.get("reasoning", "") if isinstance(a_item, dict) else ""
+        for a_item in raw_annotations
+    ]
+
+    annotations_by_title = {}
+    for a_item in raw_annotations:
         if isinstance(a_item, dict) and a_item.get("title"):
-            annotations[a_item["title"].strip().lower()] = a_item.get("reasoning", "")
+            annotations_by_title[a_item["title"].strip().lower()] = a_item.get("reasoning", "")
 
     missing = [
         s
@@ -528,7 +537,11 @@ array for "missing".
         if isinstance(s, dict) and s.get("title") and s.get("media_type") in ("movie", "tv")
     ]
 
-    return {"annotations": annotations, "missing": missing}
+    return {
+        "annotations_by_order": annotations_by_order,
+        "annotations_by_title": annotations_by_title,
+        "missing": missing,
+    }
 
 
 def resolve_tmdb_id(title: str, year: str, media_type: str, tmdb_api_key: str):
@@ -636,6 +649,24 @@ def notify(message: str, notify_url: str) -> None:
         log.warning("Notify failed: %s", exc)
 
 
+def default_filter_reasoning(franchise: dict) -> str:
+    """
+    Fallback explanation for a filter-matched item when no LLM reasoning is
+    available (LLM disabled, call failed, or this specific title wasn't
+    annotated) — every item in the approval queue should have *something*
+    explaining why it's there, not just the ones the LLM happened to touch.
+    """
+    tmdb_filter = franchise.get("tmdb_filter", {})
+    ftype = tmdb_filter.get("type", "")
+    fid = tmdb_filter.get("id", "")
+    type_label = {
+        "company": "studio/company",
+        "keyword": "keyword",
+        "network": "TV network",
+    }.get(ftype, ftype or "filter")
+    return f"Matched the TMDB {type_label} filter (ID {fid}) configured for {franchise['name']}."
+
+
 def scan_franchise(franchise: dict, core: dict) -> dict:
     """Returns {'new_count': int, 'error': str|None, 'warnings': [str, ...]} for this franchise."""
     fid = franchise["id"]
@@ -670,6 +701,7 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
             continue
         item["source"] = "filter"
         item["reasoning"] = ""
+        item["llm_reasoning"] = False
         pending[key] = item
         new_finds.append(item)
         filter_matched.append(item)
@@ -692,11 +724,22 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
             warnings.append(f"{fname}: {msg}")
         else:
             # Apply reasoning to the items the filter already found.
-            for item in filter_matched:
-                reasoning = result["annotations"].get(item["title"].strip().lower())
+            # Positional matching first — the prompt guarantees the LLM
+            # returns annotations in the same order as the candidates it
+            # was given, which is more reliable than a title-string match
+            # (the LLM can paraphrase punctuation/casing slightly).
+            # Title-based lookup is the fallback for when counts drift.
+            by_order = result["annotations_by_order"]
+            by_title = result["annotations_by_title"]
+            for idx, item in enumerate(filter_matched):
+                reasoning = by_order[idx] if idx < len(by_order) else ""
+                if not reasoning:
+                    reasoning = by_title.get(item["title"].strip().lower(), "")
                 if reasoning:
                     item["reasoning"] = reasoning
+                    item["llm_reasoning"] = True
                     pending[f"{item['media_type']}:{item['tmdb_id']}"]["reasoning"] = reasoning
+                    pending[f"{item['media_type']}:{item['tmdb_id']}"]["llm_reasoning"] = True
 
             # Add anything the LLM flagged as missing entirely.
             for s in result["missing"]:
@@ -717,10 +760,21 @@ def scan_franchise(franchise: dict, core: dict) -> dict:
                     "title": s["title"],
                     "year": s.get("year", ""),
                     "source": "llm",
-                    "reasoning": s.get("reasoning", ""),
+                    "reasoning": s.get("reasoning") or "Suggested by the LLM gap-finding pass.",
+                    "llm_reasoning": True,
                 }
                 pending[key] = item
                 new_finds.append(item)
+
+    # Every item in the approval queue should have *something* explaining
+    # why it's there — fall back to a deterministic explanation for
+    # anything that still has no reasoning (LLM disabled, call failed, or
+    # this particular title wasn't annotated).
+    for item in new_finds:
+        if not item.get("reasoning"):
+            fallback = default_filter_reasoning(franchise)
+            item["reasoning"] = fallback
+            pending[f"{item['media_type']}:{item['tmdb_id']}"]["reasoning"] = fallback
 
     if new_finds:
         save_pending(fid, pending)

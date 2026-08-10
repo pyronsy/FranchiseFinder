@@ -180,9 +180,7 @@ franchise that does two things at once:
    company/keyword filter just found gets a one-sentence reasoning from
    the LLM explaining why it belongs (or flagging if it looks like a bad
    match). These show up in the approval queue as **filter match + LLM
-   reasoning**, right alongside titles the filter found on its own with
-   no reasoning attached (LLM disabled, or that one title wasn't
-   annotated).
+   reasoning**.
 2. **Finds genuine gaps** — anything legitimately part of the franchise
    but missing from both the current list and this cycle's filter
    results, including recent/upcoming releases. Each suggestion is
@@ -190,8 +188,17 @@ franchise that does two things at once:
    that doesn't resolve to a confident match is skipped and logged rather
    than added blind. These show up tagged **LLM suggested**.
 
+Every item in the approval queue always has *some* reasoning shown, so
+you're never approving or rejecting blind. If the LLM is disabled, its
+call fails, or it just doesn't annotate a particular title, that item
+falls back to a plain, deterministic explanation of which TMDB filter
+matched it instead (shown in a plainer grey rather than the italic blue
+used for actual LLM reasoning, so you can tell the two apart at a glance).
+
 This runs *in addition to* the TMDB filter, not instead of it. Leaving the
-provider set to **Disabled** (the default) skips this step entirely.
+provider set to **Disabled** (the default) skips the LLM step entirely —
+you still get the deterministic fallback reasoning on every item either
+way.
 
 Your key is stored in `config/settings.json` on your own server (mounted
 volume, git-ignored) — never committed, never sent anywhere except the

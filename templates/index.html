@@ -12,6 +12,7 @@
     .title { font-weight: 600; }
     .sub { color: #999; font-size: 0.85rem; }
     .reasoning { color: #7aa2f7; font-size: 0.85rem; margin-top: 2px; font-style: italic; }
+    .reasoning-default { color: #888; font-style: normal; }
     .badge { display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; margin-left: 6px; vertical-align: middle; }
     .badge-llm { background: #3b2f6b; color: #cbb9ff; }
     .badge-filter { background: #2a2a2a; color: #999; }
@@ -86,7 +87,7 @@
               {{ item.title }} ({{ item.year }})
               {% if item.source == 'llm' %}
                 <span class="badge badge-llm">LLM suggested</span>
-              {% elif item.reasoning %}
+              {% elif item.llm_reasoning %}
                 <span class="badge badge-filter">filter match</span>
                 <span class="badge badge-llm">+ LLM reasoning</span>
               {% else %}
@@ -95,7 +96,11 @@
             </span>
             <span class="sub">{{ 'Movie' if item.media_type == 'movie' else 'TV Show' }} · TMDB {{ item.tmdb_id }}</span>
             {% if item.reasoning %}
-              <span class="reasoning">"{{ item.reasoning }}"</span>
+              {% if item.llm_reasoning or item.source == 'llm' %}
+                <span class="reasoning">"{{ item.reasoning }}"</span>
+              {% else %}
+                <span class="reasoning reasoning-default">{{ item.reasoning }}</span>
+              {% endif %}
             {% endif %}
           </div>
           <div>
