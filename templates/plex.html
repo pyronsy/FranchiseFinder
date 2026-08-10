@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FranchiseFinder — Plex Import</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; background: #111; color: #eee; }
+    h1 { font-size: 1.4rem; }
+    p.intro { color: #999; font-size: 0.9rem; }
+    p.intro a { color: #7aa2f7; }
+    nav { margin-bottom: 20px; }
+    nav a { color: #7aa2f7; text-decoration: none; margin-right: 16px; font-size: 0.9rem; }
+    nav a.active { color: #eee; font-weight: 600; }
+
+    .banner { padding: 10px 14px; border-radius: 6px; margin-bottom: 16px; font-size: 0.9rem; }
+    .banner-success { background: #1f4a26; border: 1px solid #2e7d32; color: #b7e6bd; }
+    .banner-error { background: #4a1f1f; border: 1px solid #6d1f1f; color: #f5b5b5; }
+
+    form.editor { border: 1px solid #333; border-radius: 8px; padding: 16px; }
+    form.editor label { display: block; margin-top: 14px; font-size: 0.85rem; color: #bbb; }
+    form.editor select {
+      width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px;
+      background: #1a1a1a; border: 1px solid #333; border-radius: 6px; color: #eee; font-family: inherit;
+    }
+    .hint-text { color: #777; font-size: 0.75rem; margin-top: 3px; }
+    .submit-row { margin-top: 20px; }
+    button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+    .scan { background: #2e7d32; color: white; }
+    .scan:disabled { background: #333; color: #888; cursor: not-allowed; }
+    .empty { color: #888; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="{{ url_for('index') }}">Approvals</a>
+    <a href="{{ url_for('rejected_page') }}">Rejected</a>
+    <a href="{{ url_for('franchises_page') }}">Manage Franchises</a>
+    <a class="active" href="{{ url_for('plex_page') }}">Plex Import</a>
+    <a href="{{ url_for('settings_page') }}">Settings</a>
+  </nav>
+
+  <h1>Plex Import</h1>
+  <p class="intro">
+    Checks titles already in a Plex library against one franchise's
+    criteria, and queues anything that matches but isn't in that
+    franchise's MDBList list yet — same approval queue as a normal scan,
+    just sourced from what you already own instead of new TMDB releases.
+  </p>
+
+  {% if not plex_configured %}
+    <p class="empty">
+      Plex isn't configured yet. <a href="{{ url_for('settings_page') }}">Add your server URL and token on the Settings page</a> first.
+    </p>
+  {% elif not franchises %}
+    <p class="empty">
+      No franchises configured yet. <a href="{{ url_for('franchises_page') }}">Add one</a> first.
+    </p>
+  {% else %}
+
+    {% if scan_result == 'error' %}
+      <div class="banner banner-error">✗ {{ scan_message }}</div>
+    {% elif scan_result == 'done' %}
+      <div class="banner banner-success">✓ {{ scan_message }} <a href="{{ url_for('index') }}">View Approvals</a></div>
+    {% endif %}
+
+    <form class="editor" method="post" action="{{ url_for('plex_scan') }}" id="plex-scan-form"
+          onsubmit="this.querySelector('button').disabled = true; this.querySelector('button').textContent = 'Checking your library… this can take a while for large libraries';">
+      <label>
+        Franchise
+        <select name="franchise_id" required>
+          {% for f in franchises %}
+            <option value="{{ f.id }}">{{ f.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        Plex library
+        <select name="library_key" id="library-select" required>
+          <option value="">Loading your Plex libraries…</option>
+        </select>
+        <div class="hint-text" id="library-hint">Movie and TV libraries only.</div>
+      </label>
+
+      <div class="hint-text" style="margin-top: 14px;">
+        Checks up to 500 items per run (large libraries may need more than
+        one run — anything already queued, rejected, or already in the
+        target list is skipped automatically, so re-running is safe).
+        Franchises using company/keyword/network filters are checked
+        directly against TMDB; franchises set to "None (LLM only)" are
+        checked in batches through your configured LLM instead.
+      </div>
+
+      <div class="submit-row">
+        <button class="scan" type="submit" id="scan-button" disabled>Check this library against this franchise</button>
+      </div>
+    </form>
+
+    <script>
+      (function () {
+        const select = document.getElementById('library-select');
+        const hint = document.getElementById('library-hint');
+        const scanButton = document.getElementById('scan-button');
+
+        fetch('{{ url_for("plex_libraries") }}')
+          .then(r => r.json())
+          .then(data => {
+            select.innerHTML = '';
+            if (data.error) {
+              select.innerHTML = '<option value="">Unavailable</option>';
+              hint.textContent = data.error;
+              return;
+            }
+            if (!data.libraries || data.libraries.length === 0) {
+              select.innerHTML = '<option value="">No movie/show libraries found</option>';
+              return;
+            }
+            data.libraries.forEach(lib => {
+              const opt = document.createElement('option');
+              opt.value = lib.key;
+              opt.textContent = `${lib.title} (${lib.type})`;
+              select.appendChild(opt);
+            });
+            scanButton.disabled = false;
+          })
+          .catch(() => {
+            select.innerHTML = '<option value="">Unavailable — check your connection</option>';
+          });
+      })();
+    </script>
+  {% endif %}
+</body>
+</html>

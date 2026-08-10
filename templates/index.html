@@ -18,6 +18,7 @@
     .badge { display: inline-block; font-size: 0.7rem; padding: 1px 6px; border-radius: 10px; margin-left: 6px; vertical-align: middle; }
     .badge-llm { background: #3b2f6b; color: #cbb9ff; }
     .badge-filter { background: #2a2a2a; color: #999; }
+    .badge-plex { background: #2a1f4a; color: #c9a3ff; }
     form { display: inline; }
     button { padding: 6px 12px; border: none; border-radius: 6px; cursor: pointer; margin-left: 6px; }
     .approve { background: #2e7d32; color: white; }
@@ -39,6 +40,7 @@
     <a class="active" href="{{ url_for('index') }}">Approvals</a>
     <a href="{{ url_for('rejected_page') }}">Rejected</a>
     <a href="{{ url_for('franchises_page') }}">Manage Franchises</a>
+    <a href="{{ url_for('plex_page') }}">Plex Import</a>
     <a href="{{ url_for('settings_page') }}">Settings</a>
   </nav>
 
@@ -90,6 +92,9 @@
               {{ item.title }} ({{ item.year }})
               {% if item.source == 'llm' %}
                 <span class="badge badge-llm">LLM suggested</span>
+              {% elif item.source == 'plex' %}
+                <span class="badge badge-plex">in your Plex library</span>
+                {% if item.llm_reasoning %}<span class="badge badge-llm">via LLM</span>{% endif %}
               {% elif item.llm_reasoning %}
                 <span class="badge badge-filter">filter match</span>
                 <span class="badge badge-llm">+ LLM reasoning</span>

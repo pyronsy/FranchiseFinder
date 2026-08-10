@@ -130,6 +130,8 @@ CORE_DEFAULTS = {
     "mdblist_api_key": "",
     "check_interval_hours": "24",
     "notify_url": "",
+    "plex_url": "",
+    "plex_token": "",
 }
 
 
@@ -179,6 +181,10 @@ def load_core_settings() -> dict:
         core["check_interval_hours"] = os.environ["CHECK_INTERVAL_HOURS"]
     if not core["notify_url"]:
         core["notify_url"] = os.environ.get("NOTIFY_URL", "")
+    if not core["plex_url"]:
+        core["plex_url"] = os.environ.get("PLEX_URL", "")
+    if not core["plex_token"]:
+        core["plex_token"] = os.environ.get("PLEX_TOKEN", "")
 
     return core
 
@@ -581,6 +587,184 @@ def get_imdb_id(media_type: str, tmdb_id: str, tmdb_api_key: str) -> str:
     except requests.RequestException as exc:
         log.debug("Could not fetch IMDb ID for %s:%s: %s", media_type, tmdb_id, exc)
         return ""
+
+
+# --------------------------------------------------------------------------
+# Plex (import existing library items for franchise matching)
+# --------------------------------------------------------------------------
+
+_TMDB_GUID_RE = re.compile(r"tmdb://(\d+)")
+_TMDB_LEGACY_GUID_RE = re.compile(r"themoviedb://(\d+)")
+
+
+def _plex_headers(plex_token: str) -> dict:
+    return {"X-Plex-Token": plex_token, "Accept": "application/json"}
+
+
+def test_plex_connection(plex_url: str, plex_token: str):
+    """Hits Plex's /identity endpoint, which works with any valid token."""
+    url = plex_url.rstrip("/") + "/identity"
+    try:
+        resp = requests.get(url, headers=_plex_headers(plex_token), timeout=15)
+        if resp.ok:
+            return True, "Plex server reachable."
+        return False, f"Plex error {resp.status_code}: {resp.text[:150]}"
+    except requests.RequestException as exc:
+        return False, f"Could not reach Plex: {exc}"
+
+
+def get_plex_libraries(plex_url: str, plex_token: str) -> list:
+    """Returns [{key, title, type}] for movie and show libraries only."""
+    url = plex_url.rstrip("/") + "/library/sections"
+    resp = requests.get(url, headers=_plex_headers(plex_token), timeout=20)
+    resp.raise_for_status()
+    data = resp.json()
+    directories = data.get("MediaContainer", {}).get("Directory", [])
+    return [
+        {"key": d.get("key"), "title": d.get("title", ""), "type": d.get("type", "")}
+        for d in directories
+        if d.get("type") in ("movie", "show")
+    ]
+
+
+def _extract_tmdb_id_from_plex_item(item: dict):
+    """
+    Modern Plex Media Server returns a `Guid` array like
+    [{"id": "tmdb://12345"}, {"id": "imdb://tt123"}, ...] when the request
+    includes includeGuids=1. Older/legacy-agent libraries instead embed a
+    single `guid` string using the full agent identifier
+    (e.g. "com.plexapp.agents.themoviedb://12345?lang=en" — note this is
+    "themoviedb", not "tmdb", so it needs its own pattern). This checks
+    both shapes.
+    """
+    for g in item.get("Guid", []) or []:
+        match = _TMDB_GUID_RE.search(g.get("id", ""))
+        if match:
+            return match.group(1)
+    legacy_guid = item.get("guid", "") or ""
+    match = _TMDB_GUID_RE.search(legacy_guid) or _TMDB_LEGACY_GUID_RE.search(legacy_guid)
+    if match:
+        return match.group(1)
+    return None
+
+
+def get_plex_library_items(plex_url: str, plex_token: str, library_key: str, limit: int = 500) -> list:
+    """
+    Returns up to `limit` items from one Plex library as
+    [{title, year, media_type, tmdb_id (may be None)}]. Caps at `limit` to
+    keep a single import run's duration reasonable — very large libraries
+    may need more than one run (each run skips titles already queued or
+    already in the target MDBList list, so re-running is safe).
+    """
+    url = plex_url.rstrip("/") + f"/library/sections/{library_key}/all"
+    resp = requests.get(
+        url,
+        headers=_plex_headers(plex_token),
+        params={"includeGuids": 1, "X-Plex-Container-Start": 0, "X-Plex-Container-Size": limit},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    metadata = data.get("MediaContainer", {}).get("Metadata", [])
+
+    items = []
+    for m in metadata:
+        plex_type = m.get("type")
+        media_type = "movie" if plex_type == "movie" else "tv" if plex_type == "show" else None
+        if not media_type:
+            continue
+        items.append(
+            {
+                "title": m.get("title", ""),
+                "year": str(m.get("year", "")) if m.get("year") else "",
+                "media_type": media_type,
+                "tmdb_id": _extract_tmdb_id_from_plex_item(m),
+            }
+        )
+    return items
+
+
+def matches_tmdb_filter(media_type: str, tmdb_id: str, tmdb_filter: dict, tmdb_api_key: str):
+    """
+    Checks whether one TMDB title matches a franchise's company/keyword/
+    network filter, by fetching its TMDB details and comparing IDs — the
+    reverse direction of the normal Discover-based scan. Returns True/False,
+    or None if tmdb_filter is type "none" (no criteria to check against;
+    caller should use LLM classification instead).
+    """
+    ftype = tmdb_filter.get("type")
+    fid = tmdb_filter.get("id")
+    if ftype == "none":
+        return None
+    if ftype == "network" and media_type != "tv":
+        return False
+
+    params = {"api_key": tmdb_api_key}
+    if ftype == "keyword":
+        params["append_to_response"] = "keywords"
+    try:
+        resp = requests.get(f"{TMDB_BASE}/{media_type}/{tmdb_id}", params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as exc:
+        log.debug("TMDB detail lookup failed for %s:%s: %s", media_type, tmdb_id, exc)
+        return False
+
+    if ftype == "company":
+        return any(c.get("id") == fid for c in (data.get("production_companies") or []))
+    if ftype == "network":
+        return any(n.get("id") == fid for n in (data.get("networks") or []))
+    if ftype == "keyword":
+        kw_block = data.get("keywords", {}) or {}
+        keywords = kw_block.get("keywords") or kw_block.get("results") or []
+        return any(k.get("id") == fid for k in keywords)
+    return False
+
+
+def _extract_json_array(text: str):
+    """LLMs sometimes wrap JSON in prose or code fences — pull out the array."""
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end < start:
+        return []
+    try:
+        return json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        log.warning("Could not parse LLM JSON output")
+        return []
+
+
+def llm_classify_plex_batch(franchise: dict, titles_batch: list) -> list:
+    """
+    For "none"-type (LLM-only) franchises, asks the LLM which titles in a
+    batch from the Plex library genuinely belong to this franchise.
+    Returns [{title, reasoning}] for matches only. Batched (not one call
+    per title) to keep this affordable against a large library.
+    """
+    settings = load_llm_settings()
+    if settings.get("provider", "none") == "none":
+        return []
+
+    titles_block = "\n".join(f"- {t['title']} ({t['year']})" for t in titles_batch)
+    hint = franchise.get("llm_hint", "")
+
+    prompt = f"""You are checking which titles from a Plex media library belong to the
+franchise "{franchise['name']}".
+
+{hint}
+
+Titles to check:
+{titles_block}
+
+Respond with ONLY a JSON array (no prose, no markdown fences) listing ONLY
+the titles above that genuinely belong to this franchise, in this shape:
+[{{"title": "...", "reasoning": "one short sentence"}}]
+
+If none of them belong, respond with an empty array: []
+"""
+    raw = call_llm(prompt, settings)
+    parsed = _extract_json_array(raw)
+    return [p for p in parsed if isinstance(p, dict) and p.get("title")]
 
 
 # --------------------------------------------------------------------------
@@ -1055,6 +1239,145 @@ def reject(franchise_id: str, media_type: str, tmdb_id: str):
     return redirect(url_for("index"))
 
 
+@app.get("/plex")
+def plex_page():
+    core = load_core_settings()
+    return render_template(
+        "plex.html",
+        franchises=load_franchises(),
+        plex_configured=bool(core["plex_url"] and core["plex_token"]),
+        scan_result=request.args.get("scan_result"),
+        scan_message=request.args.get("scan_message"),
+    )
+
+
+@app.get("/plex/libraries")
+def plex_libraries():
+    """JSON endpoint the Plex Import page calls to populate the library picker."""
+    core = load_core_settings()
+    if not core["plex_url"] or not core["plex_token"]:
+        return jsonify({"libraries": [], "error": "Plex isn't configured yet on the Settings page."})
+    try:
+        libraries = get_plex_libraries(core["plex_url"], core["plex_token"])
+    except requests.RequestException as exc:
+        return jsonify({"libraries": [], "error": f"Could not reach Plex: {exc}"})
+    return jsonify({"libraries": libraries, "error": None})
+
+
+@app.post("/plex/scan")
+def plex_scan():
+    core = load_core_settings()
+    franchise_id = request.form.get("franchise_id", "")
+    library_key = request.form.get("library_key", "")
+
+    if not core["plex_url"] or not core["plex_token"]:
+        return redirect(url_for("plex_page", scan_result="error", scan_message="Plex isn't configured on the Settings page."))
+    if not core["tmdb_api_key"]:
+        return redirect(url_for("plex_page", scan_result="error", scan_message="TMDB API key isn't configured on the Settings page."))
+    if not library_key:
+        return redirect(url_for("plex_page", scan_result="error", scan_message="Pick a Plex library first."))
+
+    franchise = get_franchise(franchise_id)
+
+    try:
+        plex_items = get_plex_library_items(core["plex_url"], core["plex_token"], library_key)
+    except requests.RequestException as exc:
+        return redirect(url_for("plex_page", scan_result="error", scan_message=f"Could not read Plex library: {exc}"))
+
+    try:
+        current = get_current_mdblist_tmdb_ids(franchise["mdblist_list_id"], core["mdblist_api_key"])
+    except requests.RequestException as exc:
+        return redirect(url_for("plex_page", scan_result="error", scan_message=f"Could not read MDBList list: {exc}"))
+
+    pending = load_pending(franchise["id"])
+    rejected = load_rejected(franchise["id"])
+    tmdb_filter = franchise["tmdb_filter"]
+    is_llm_only = tmdb_filter.get("type") == "none"
+
+    # Resolve any Plex items missing a TMDB ID (legacy-agent libraries) by title/year search.
+    for item in plex_items:
+        if not item["tmdb_id"]:
+            item["tmdb_id"] = resolve_tmdb_id(item["title"], item["year"], item["media_type"], core["tmdb_api_key"])
+
+    checkable = [i for i in plex_items if i["tmdb_id"]]
+    unresolved_count = len(plex_items) - len(checkable)
+
+    # Skip anything already in the target list or already queued/rejected.
+    to_check = [
+        i for i in checkable
+        if (i["media_type"], i["tmdb_id"]) not in current
+        and f"{i['media_type']}:{i['tmdb_id']}" not in pending
+        and f"{i['media_type']}:{i['tmdb_id']}" not in rejected
+    ]
+
+    new_finds = []
+
+    if is_llm_only:
+        if load_llm_settings().get("provider", "none") == "none":
+            return redirect(
+                url_for(
+                    "plex_page",
+                    scan_result="error",
+                    scan_message=f"{franchise['name']} is set to \"None (LLM only)\" but no LLM provider is configured.",
+                )
+            )
+        batch_size = 25
+        for i in range(0, len(to_check), batch_size):
+            batch = to_check[i : i + batch_size]
+            try:
+                matches = llm_classify_plex_batch(franchise, batch)
+            except (requests.RequestException, ValueError) as exc:
+                log.warning("[%s] Plex LLM classification failed: %s", franchise["id"], exc)
+                continue
+            matched_titles = {m["title"].strip().lower(): m.get("reasoning", "") for m in matches}
+            for plex_item in batch:
+                reasoning = matched_titles.get(plex_item["title"].strip().lower())
+                if reasoning is None:
+                    continue
+                key = f"{plex_item['media_type']}:{plex_item['tmdb_id']}"
+                item = {
+                    "tmdb_id": plex_item["tmdb_id"],
+                    "media_type": plex_item["media_type"],
+                    "title": plex_item["title"],
+                    "year": plex_item["year"],
+                    "source": "plex",
+                    "reasoning": reasoning or "Matched by the LLM against your Plex library.",
+                    "llm_reasoning": True,
+                    "imdb_id": get_imdb_id(plex_item["media_type"], plex_item["tmdb_id"], core["tmdb_api_key"]),
+                }
+                pending[key] = item
+                new_finds.append(item)
+    else:
+        for plex_item in to_check:
+            is_match = matches_tmdb_filter(plex_item["media_type"], plex_item["tmdb_id"], tmdb_filter, core["tmdb_api_key"])
+            if not is_match:
+                continue
+            key = f"{plex_item['media_type']}:{plex_item['tmdb_id']}"
+            item = {
+                "tmdb_id": plex_item["tmdb_id"],
+                "media_type": plex_item["media_type"],
+                "title": plex_item["title"],
+                "year": plex_item["year"],
+                "source": "plex",
+                "reasoning": (
+                    f"Already in your Plex library and matches the TMDB "
+                    f"{tmdb_filter['type']} filter configured for {franchise['name']}."
+                ),
+                "llm_reasoning": False,
+                "imdb_id": get_imdb_id(plex_item["media_type"], plex_item["tmdb_id"], core["tmdb_api_key"]),
+            }
+            pending[key] = item
+            new_finds.append(item)
+
+    if new_finds:
+        save_pending(franchise["id"], pending)
+
+    msg = f"Checked {len(plex_items)} Plex item(s) — found {len(new_finds)} match(es) for {franchise['name']}, added to Approvals."
+    if unresolved_count:
+        msg += f" ({unresolved_count} item(s) had no TMDB match and were skipped.)"
+    return redirect(url_for("plex_page", scan_result="done", scan_message=msg))
+
+
 @app.get("/rejected")
 def rejected_page():
     franchises = load_franchises()
@@ -1165,6 +1488,7 @@ def settings_page():
         **core_settings,
         "tmdb_api_key_masked": mask_key(core_settings.get("tmdb_api_key", "")),
         "mdblist_api_key_masked": mask_key(core_settings.get("mdblist_api_key", "")),
+        "plex_token_masked": mask_key(core_settings.get("plex_token", "")),
     }
 
     return render_template(
@@ -1191,6 +1515,10 @@ def settings_core_save():
     if submitted_mdblist and submitted_mdblist == mask_key(existing.get("mdblist_api_key", "")):
         submitted_mdblist = existing.get("mdblist_api_key", "")
 
+    submitted_plex_token = request.form.get("plex_token", "").strip()
+    if submitted_plex_token and submitted_plex_token == mask_key(existing.get("plex_token", "")):
+        submitted_plex_token = existing.get("plex_token", "")
+
     interval_raw = request.form.get("check_interval_hours", "").strip() or "24"
     try:
         interval = float(interval_raw)
@@ -1210,6 +1538,8 @@ def settings_core_save():
         "mdblist_api_key": submitted_mdblist,
         "check_interval_hours": str(interval),
         "notify_url": request.form.get("notify_url", "").strip(),
+        "plex_url": request.form.get("plex_url", "").strip().rstrip("/"),
+        "plex_token": submitted_plex_token,
     }
     save_core_settings(new_core)
 
@@ -1230,6 +1560,15 @@ def settings_core_save():
         else:
             all_ok = False
             messages.append("No MDBList key set.")
+        if new_core["plex_url"] and new_core["plex_token"]:
+            ok, msg = test_plex_connection(new_core["plex_url"], new_core["plex_token"])
+            all_ok = all_ok and ok
+            messages.append(msg)
+        elif new_core["plex_url"] or new_core["plex_token"]:
+            all_ok = False
+            messages.append("Plex needs both a server URL and a token to test.")
+        else:
+            messages.append("Plex not configured (optional).")
         return redirect(
             url_for(
                 "settings_page",

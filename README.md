@@ -99,6 +99,51 @@ proportional to what's actually new), so items added before this feature
 existed will show a TMDB link only until they're rechecked or a franchise
 rescans them.
 
+## Plex Import
+
+Normal scans only look for *new* TMDB releases. **Plex Import** does the
+opposite: it checks titles you **already own** in a Plex library against
+one franchise's criteria, and queues anything that matches but isn't in
+that franchise's MDBList list yet — through the same Approvals queue as a
+normal scan, tagged **in your Plex library**.
+
+### Setup
+
+Add your Plex server URL and token on the **Settings** page (optional —
+only needed for this feature):
+
+- **Server URL**: e.g. `http://192.168.1.10:32400` (must be reachable from
+  wherever the container runs)
+- **Token**: see
+  [Plex's guide to finding your token](https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/)
+
+**Save & test connection** hits Plex's `/identity` endpoint to confirm
+both are correct before you rely on them.
+
+### Using it
+
+On the **Plex Import** page, pick a franchise and a Plex library (movie or
+TV — populated live from your server), then run the check. What happens
+depends on that franchise's `tmdb_filter`:
+
+- **company / keyword / network** — each Plex item's TMDB ID is checked
+  directly against TMDB's own data (production companies, keywords, or
+  networks) for a match. No LLM involved, same criteria the normal scan
+  uses, just checked in the opposite direction.
+- **none (LLM only)** — titles are sent to your configured LLM in
+  batches (25 at a time, not one call per title) to judge which ones
+  genuinely belong, the same way the normal gap-finding pass does.
+
+Either way, items already in the target MDBList list, already pending, or
+already rejected are skipped automatically. Each run checks up to 500
+Plex items — large libraries may need more than one run, which is safe
+since already-processed items are always skipped on the next pass.
+
+Plex items without a recognizable TMDB ID in their metadata (rare, mostly
+very old legacy-agent libraries) get one title/year search against TMDB
+as a fallback; if that doesn't resolve either, they're skipped and the
+result message tells you how many were skipped that way.
+
 ## Getting API keys
 
 - **TMDB**: https://www.themoviedb.org/settings/api (free, no card)
@@ -323,6 +368,7 @@ this locally, see Quick Start above.
 app.py                          # scan loop + Flask web UI
 templates/index.html            # approval queue page
 templates/rejected.html         # rejected items — recheck or delete permanently
+templates/plex.html             # cross-reference a Plex library against a franchise
 templates/franchises.html       # add/edit/delete franchises
 templates/settings.html         # TMDB/MDBList keys + LLM provider settings
 config/franchises.example.json  # reference template for franchises.json (or just use the UI)
