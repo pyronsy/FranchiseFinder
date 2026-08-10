@@ -147,6 +147,20 @@ very old legacy-agent libraries) get one title/year search against TMDB
 as a fallback; if that doesn't resolve either, they're skipped and the
 result message tells you how many were skipped that way.
 
+### LLM rate limits during a large Plex scan
+
+A big library on an LLM-only franchise can mean a dozen-plus batched LLM
+calls in one run (25 titles per call). On a free-tier provider that's
+enough to trip a per-minute rate limit partway through. Every LLM call in
+the app — including these — automatically retries a 429 up to twice with
+backoff (respecting a `Retry-After` header if the provider sends one,
+otherwise 5s then 10s, capped at 30s), and there's also a small proactive
+1.5s gap between Plex batches specifically to make hitting the limit less
+likely in the first place. If a batch still fails after retrying, it's
+skipped (not the whole scan) and the result message tells you exactly
+which provider/limit hit and suggests trying again shortly — safe to
+re-run immediately, since already-processed items are always skipped.
+
 ### If a scan finds zero matches
 
 The result message breaks down the full funnel — items fetched from Plex,

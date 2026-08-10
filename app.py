@@ -450,6 +450,49 @@ def call_llm(prompt: str, settings: dict) -> str:
     return caller(prompt, settings)
 
 
+def call_llm_with_retry(prompt: str, settings: dict, max_retries: int = 2) -> str:
+    """
+    Wraps call_llm with automatic retry-with-backoff specifically for 429
+    (rate limit / quota) responses. Without this, a single burst of calls
+    against a free-tier provider — e.g. the Plex Import scan, which can
+    fire off a dozen-plus batched calls back-to-back for a large library —
+    hits the limit once and then every subsequent call fails the exact
+    same way for the rest of that scan, even though the limit is usually
+    per-minute and would clear on its own with a short wait.
+
+    Respects a Retry-After response header if the provider sends one,
+    otherwise backs off 5s/10s/... capped at 30s between attempts. Raises
+    the underlying exception once retries are exhausted, same as a plain
+    call_llm() failure — callers don't need to change their error handling.
+    """
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return call_llm(prompt, settings)
+        except requests.HTTPError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            is_429 = status == 429 or "429" in str(exc)
+            if not is_429 or attempt >= max_retries:
+                raise
+            retry_after = None
+            if getattr(exc, "response", None) is not None:
+                retry_after = exc.response.headers.get("Retry-After")
+            try:
+                wait = float(retry_after) if retry_after else 5.0 * (attempt + 1)
+            except ValueError:
+                wait = 5.0 * (attempt + 1)
+            wait = min(wait, 30.0)
+            log.info(
+                "LLM call rate-limited (429) — retrying in %.0fs (attempt %d/%d)",
+                wait,
+                attempt + 1,
+                max_retries,
+            )
+            time.sleep(wait)
+            last_exc = exc
+    raise last_exc
+
+
 def _extract_json_object(text: str):
     """LLMs sometimes wrap JSON in prose or code fences — pull out the object."""
     start = text.find("{")
@@ -524,7 +567,7 @@ candidates list empty (then "annotations" is also empty). If nothing is
 missing, use an empty array for "missing".
 """
 
-    raw = call_llm(prompt, settings)
+    raw = call_llm_with_retry(prompt, settings)
     parsed = _extract_json_object(raw)
 
     raw_annotations = parsed.get("annotations", []) if isinstance(parsed, dict) else []
@@ -792,7 +835,7 @@ Set "belongs" to true only for titles you are confident genuinely belong
 to this franchise. The array length must match the number of titles
 listed above exactly.
 """
-    raw = call_llm(prompt, settings)
+    raw = call_llm_with_retry(prompt, settings)
     parsed = _extract_json_array(raw)
 
     if len(parsed) != len(titles_batch):
@@ -1390,12 +1433,24 @@ def plex_scan():
                 )
             )
         batch_size = 25
+        last_llm_error_message = ""
         for i in range(0, len(to_check), batch_size):
+            if i > 0:
+                # Small proactive gap between batches — a large library can mean
+                # a dozen-plus calls back-to-back, which is exactly the kind of
+                # burst that trips a free-tier per-minute rate limit in the
+                # first place. This doesn't guarantee avoiding it (see the
+                # retry-with-backoff inside call_llm_with_retry for that), but
+                # it meaningfully reduces how often it happens.
+                time.sleep(1.5)
             batch = to_check[i : i + batch_size]
             try:
                 classifications = llm_classify_plex_batch(franchise, batch)
             except (requests.RequestException, ValueError) as exc:
-                log.warning("[%s] Plex LLM classification failed: %s", franchise["id"], exc)
+                last_llm_error_message = _friendly_llm_error(
+                    exc, load_llm_settings().get("provider", ""), context="plex_import"
+                )
+                log.warning("[%s] Plex LLM classification failed: %s", franchise["id"], last_llm_error_message)
                 llm_batch_failures += 1
                 continue
             for idx, plex_item in enumerate(batch):
@@ -1456,7 +1511,7 @@ def plex_scan():
     if unresolved_count:
         msg += f" {unresolved_count} item(s) had no TMDB match and were skipped."
     if llm_batch_failures:
-        msg += f" {llm_batch_failures} LLM batch(es) failed and were skipped — check the app logs."
+        msg += f" {llm_batch_failures} LLM batch(es) failed and were skipped: {last_llm_error_message}"
     return redirect(url_for("plex_page", scan_result="done", scan_message=msg))
 
 
@@ -1662,11 +1717,16 @@ def settings_core_save():
     return redirect(url_for("settings_page", core_test_result="saved"))
 
 
-def _friendly_llm_error(exc: Exception, provider: str) -> str:
+def _friendly_llm_error(exc: Exception, provider: str, context: str = "scan") -> str:
     """
     Adds an actionable hint for the most common failure modes: a model ID
     that's been renamed/retired (404), or a rate limit / quota cap being
     hit (429) — the latter is expected behavior on free tiers, not a bug.
+
+    `context` adjusts the 429 message's framing: "scan" (default) implies
+    an automatic retry will happen on the next scheduled cycle, which is
+    true for the normal gap-finding pass but not for a one-off manual
+    check like Plex Import — pass context="plex_import" there instead.
     """
     text = str(exc)
     label = LLM_PROVIDERS.get(provider, {}).get("label", provider or "LLM provider")
@@ -1674,11 +1734,16 @@ def _friendly_llm_error(exc: Exception, provider: str) -> str:
 
     is_429 = status_code == 429 or "429" in text or "rate limit" in text.lower() or "quota" in text.lower()
     if is_429:
+        if context == "plex_import":
+            retry_hint = "try running this check again in a few minutes."
+        else:
+            retry_hint = (
+                "the LLM gap-finding pass was skipped this cycle and will "
+                "retry next scan automatically."
+            )
         return (
             f"{label} rate limit or quota reached. This is expected on free "
-            f"tiers if you scan often or track many franchises — the LLM "
-            f"gap-finding pass was skipped this cycle and will retry next "
-            f"scan automatically."
+            f"tiers if you scan often or track many franchises — {retry_hint}"
         )
 
     is_404 = status_code == 404 or "404" in text
